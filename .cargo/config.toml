@@ -1,0 +1,25 @@
+# Keep compilation settings in this file and user/runtime settings in `esp-config.toml`.
+include = ["esp-config.toml"]
+
+[target.riscv32imac-unknown-none-elf]
+runner = "espflash flash --chip esp32c6 --monitor"
+
+[build]
+rustflags = [
+  # Required to obtain backtraces (e.g. when using the "esp-backtrace" crate.)
+  # NOTE: May negatively impact performance of produced code
+  "-C", "force-frame-pointers",
+  "-Z", "stack-protector=all",
+]
+
+target = "riscv32imac-unknown-none-elf"
+
+[unstable]
+build-std = ["alloc", "core"]
+
+[env]
+# `build-std` and `-Z stack-protector=all` are unstable options, which the
+# stable channel pinned in `rust-toolchain.toml` rejects by default. Setting
+# this here keeps `cargo build` / `cargo run` working without extra shell
+# variables.
+RUSTC_BOOTSTRAP = "1"
