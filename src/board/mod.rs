@@ -3,7 +3,6 @@
 pub mod display;
 pub mod imu;
 pub mod power_key;
-pub mod reserved_pins;
 pub mod rtc;
 
 use core::cell::RefCell;
@@ -13,25 +12,30 @@ use esp_hal::Blocking;
 use esp_hal::gpio::{Input, InputConfig, Pull};
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::peripherals::{
-    ADC1, GPIO0, GPIO4, GPIO5, GPIO6, GPIO7, GPIO8, GPIO9, GPIO10, GPIO11, GPIO15, GPIO18, GPIO19,
-    GPIO20, GPIO21, GPIO23, GPIO24, GPIO25, GPIO26, GPIO27, GPIO28, GPIO29, GPIO30, I2C0, LEDC,
-    SPI2,
+    ADC1, FLASH, GPIO0, GPIO4, GPIO5, GPIO6, GPIO7, GPIO8, GPIO9, GPIO10, GPIO11, GPIO15, GPIO18,
+    GPIO19, GPIO20, GPIO21, GPIO23, I2C0, LEDC, SPI2,
 };
 use esp_hal::time::Rate;
-use static_cell::StaticCell;
+use static_cell::{ConstStaticCell, StaticCell};
 
-pub use display::{Backlight, BandDisplay, BandTarget, DISPLAY_HEIGHT, DISPLAY_WIDTH};
-pub use imu::{ImuError, ImuSample, Qmi8658};
-pub use power_key::PowerKeyMonitor;
-pub use reserved_pins::ReservedPins;
-pub use rtc::{DateTime, Pcf85063, RtcStatus, datetime_to_epoch, epoch_to_datetime};
+pub use crate::storage::StorageManager;
+pub use display::{
+    BAND_BUFFER_SIZE, Backlight, BandDisplay, BandTarget, DISPLAY_HEIGHT, DISPLAY_WIDTH,
+    DisplayPins,
+};
+pub use imu::{ImuAttitudeSnapshot, ImuError, ImuSample, ImuStatus, Qmi8658};
+pub use power_key::{ButtonPressState, ChargeState, PowerKeyMonitor, PowerStatus};
+pub use rtc::{DateTime, Pcf85063, RtcError, RtcStatus, datetime_to_epoch, epoch_to_datetime};
 
 pub type SharedI2c = Mutex<RefCell<I2c<'static, Blocking>>>;
 pub type SharedI2cDevice<'a> = CriticalSectionDevice<'a, I2c<'static, Blocking>>;
 
 static SHARED_I2C: StaticCell<SharedI2c> = StaticCell::new();
+static DISPLAY_BAND_BUFFER: ConstStaticCell<[u16; BAND_BUFFER_SIZE]> =
+    ConstStaticCell::new([0u16; BAND_BUFFER_SIZE]);
 
 pub struct BoardPeripherals<'d> {
+    pub flash: FLASH<'d>,
     pub spi2: SPI2<'d>,
     pub ledc: LEDC<'static>,
     pub i2c0: I2C0<'d>,
@@ -51,14 +55,6 @@ pub struct BoardPeripherals<'d> {
     pub gpio20: GPIO20<'d>,
     pub gpio21: GPIO21<'d>,
     pub gpio23: GPIO23<'d>,
-    // Mandatory handover of bootstrapping / internal flash pins
-    pub gpio24: GPIO24<'d>,
-    pub gpio25: GPIO25<'d>,
-    pub gpio26: GPIO26<'d>,
-    pub gpio27: GPIO27<'d>,
-    pub gpio28: GPIO28<'d>,
-    pub gpio29: GPIO29<'d>,
-    pub gpio30: GPIO30<'d>,
 }
 
 pub struct Board<'d> {
@@ -67,10 +63,10 @@ pub struct Board<'d> {
     pub imu: Qmi8658<SharedI2cDevice<'static>>,
     pub rtc: Pcf85063<SharedI2cDevice<'static>>,
     pub power_key: PowerKeyMonitor<'d>,
+    pub storage: StorageManager<'d>,
     pub imu_int1: Input<'d>,
     pub imu_int2: Input<'d>,
     pub rtc_int: Input<'d>,
-    _reserved_pins: ReservedPins,
 }
 
 impl Board<'static> {
@@ -78,15 +74,19 @@ impl Board<'static> {
         // 1. Backlight
         let backlight = Backlight::new(peri.ledc, peri.gpio7);
 
-        // 2. Display (SPI2)
+        // 2. Display (SPI2) with static band buffer allocation
+        let band_buffer = DISPLAY_BAND_BUFFER.take();
         let display = BandDisplay::new(
             peri.spi2,
-            peri.gpio11, // SCK
-            peri.gpio21, // MOSI
-            peri.gpio10, // CS
-            peri.gpio19, // DC
-            peri.gpio20, // RST
-            peri.gpio15, // SD_CS (deselect)
+            DisplayPins {
+                sck: peri.gpio11,
+                mosi: peri.gpio21,
+                cs: peri.gpio10,
+                dc: peri.gpio19,
+                rst: peri.gpio20,
+                sd_cs: peri.gpio15,
+            },
+            band_buffer,
         );
 
         // 3. Shared I2C0 for IMU & RTC
@@ -100,27 +100,20 @@ impl Board<'static> {
         let imu_device = CriticalSectionDevice::new(shared_i2c);
         let rtc_device = CriticalSectionDevice::new(shared_i2c);
 
-        // 4. IMU & RTC Drivers
-        let imu = Qmi8658::new(imu_device).expect("QMI8658 init failed");
+        // 4. IMU & RTC Drivers (Fault-tolerant initialization with graceful degradation)
+        let imu = Qmi8658::new(imu_device);
         let rtc = Pcf85063::new(rtc_device);
 
         // 5. Power rail ADC & BOOT key
         let power_key = PowerKeyMonitor::new(peri.adc1, peri.gpio0, peri.gpio23, peri.gpio9);
 
-        // 6. Interrupt Inputs
+        // 6. Flash Storage Manager
+        let storage = StorageManager::new(peri.flash);
+
+        // 7. Interrupt Inputs
         let imu_int1 = Input::new(peri.gpio4, InputConfig::default().with_pull(Pull::Down));
         let imu_int2 = Input::new(peri.gpio5, InputConfig::default().with_pull(Pull::Down));
         let rtc_int = Input::new(peri.gpio6, InputConfig::default().with_pull(Pull::Up));
-
-        let reserved_pins = ReservedPins::seal(
-            peri.gpio24,
-            peri.gpio25,
-            peri.gpio26,
-            peri.gpio27,
-            peri.gpio28,
-            peri.gpio29,
-            peri.gpio30,
-        );
 
         Self {
             display,
@@ -128,10 +121,10 @@ impl Board<'static> {
             imu,
             rtc,
             power_key,
+            storage,
             imu_int1,
             imu_int2,
             rtc_int,
-            _reserved_pins: reserved_pins,
         }
     }
 }

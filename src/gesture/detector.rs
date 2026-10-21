@@ -72,7 +72,8 @@ impl GestureDetector {
         let jerk = d_az + (d_ax + d_ay) / 2;
         self.prev_sample = *sample;
 
-        let is_tap_peak = jerk > 650;
+        // Lower threshold from 650 to 320 for responsive light table/chassis tap recognition
+        let is_tap_peak = jerk > 320;
 
         // Tap State Machine
         let mut tap_event = None;
@@ -84,19 +85,20 @@ impl GestureDetector {
             }
             TapState::FirstTapDetected { time } => {
                 let elapsed = now.duration_since(time);
+                // Natural human double-tap interval: 60ms..=420ms
                 if is_tap_peak
-                    && elapsed >= Duration::from_millis(70)
-                    && elapsed <= Duration::from_millis(280)
+                    && elapsed >= Duration::from_millis(60)
+                    && elapsed <= Duration::from_millis(420)
                 {
                     tap_event = Some(GestureEvent::DoubleTap);
                     self.tap_state = TapState::Cooldown { time: now };
-                } else if elapsed > Duration::from_millis(280) {
+                } else if elapsed > Duration::from_millis(420) {
                     tap_event = Some(GestureEvent::SingleTap);
                     self.tap_state = TapState::Cooldown { time: now };
                 }
             }
             TapState::Cooldown { time } => {
-                if now.duration_since(time) > Duration::from_millis(300) {
+                if now.duration_since(time) > Duration::from_millis(180) {
                     self.tap_state = TapState::Idle;
                 }
             }
@@ -106,16 +108,16 @@ impl GestureDetector {
             return Some(evt);
         }
 
-        // 2. FaceDown State Machine (Z gravity < -750mg)
+        // 2. FaceDown State Machine (Z gravity < -650mg, responsive 200ms entry / 100ms exit)
         match self.facedown_state {
             FaceDownState::FaceUp => {
-                if attitude.gz_filt_mg < -750.0 {
+                if attitude.gz_filt_mg < -650.0 {
                     self.facedown_state = FaceDownState::Entering { since: now };
                 }
             }
             FaceDownState::Entering { since } => {
-                if attitude.gz_filt_mg < -750.0 {
-                    if now.duration_since(since) >= Duration::from_millis(500) {
+                if attitude.gz_filt_mg < -650.0 {
+                    if now.duration_since(since) >= Duration::from_millis(200) {
                         self.facedown_state = FaceDownState::FaceDown;
                         return Some(GestureEvent::FaceDownEnter);
                     }
@@ -124,13 +126,13 @@ impl GestureDetector {
                 }
             }
             FaceDownState::FaceDown => {
-                if attitude.gz_filt_mg > 500.0 {
+                if attitude.gz_filt_mg > 400.0 {
                     self.facedown_state = FaceDownState::Exiting { since: now };
                 }
             }
             FaceDownState::Exiting { since } => {
-                if attitude.gz_filt_mg > 500.0 {
-                    if now.duration_since(since) >= Duration::from_millis(300) {
+                if attitude.gz_filt_mg > 400.0 {
+                    if now.duration_since(since) >= Duration::from_millis(100) {
                         self.facedown_state = FaceDownState::FaceUp;
                         return Some(GestureEvent::FaceDownExit);
                     }
@@ -140,19 +142,19 @@ impl GestureDetector {
             }
         }
 
-        // 3. Tilt State Machine (Pitch < 35°, Z > 500mg)
-        if fabsf(attitude.pitch_deg) < 35.0 && attitude.gz_filt_mg > 500.0 {
+        // 3. Tilt State Machine: Ergonomic 18 deg threshold, 60ms dwell, broader pitch tolerance
+        if fabsf(attitude.pitch_deg) < 50.0 && attitude.gz_filt_mg > 400.0 {
             match self.tilt_state {
                 TiltState::Centered => {
-                    if attitude.roll_deg < -28.0 {
+                    if attitude.roll_deg < -18.0 {
                         self.tilt_state = TiltState::TiltedLeft { since: now };
-                    } else if attitude.roll_deg > 28.0 {
+                    } else if attitude.roll_deg > 18.0 {
                         self.tilt_state = TiltState::TiltedRight { since: now };
                     }
                 }
                 TiltState::TiltedLeft { since } => {
-                    if attitude.roll_deg < -28.0 {
-                        if now.duration_since(since) >= Duration::from_millis(120) {
+                    if attitude.roll_deg < -18.0 {
+                        if now.duration_since(since) >= Duration::from_millis(60) {
                             self.tilt_state = TiltState::LockedLeft;
                             return Some(GestureEvent::TiltLeft);
                         }
@@ -161,8 +163,8 @@ impl GestureDetector {
                     }
                 }
                 TiltState::TiltedRight { since } => {
-                    if attitude.roll_deg > 28.0 {
-                        if now.duration_since(since) >= Duration::from_millis(120) {
+                    if attitude.roll_deg > 18.0 {
+                        if now.duration_since(since) >= Duration::from_millis(60) {
                             self.tilt_state = TiltState::LockedRight;
                             return Some(GestureEvent::TiltRight);
                         }
@@ -171,12 +173,12 @@ impl GestureDetector {
                     }
                 }
                 TiltState::LockedLeft => {
-                    if attitude.roll_deg > -12.0 {
+                    if attitude.roll_deg > -8.0 {
                         self.tilt_state = TiltState::Centered;
                     }
                 }
                 TiltState::LockedRight => {
-                    if attitude.roll_deg < 12.0 {
+                    if attitude.roll_deg < 8.0 {
                         self.tilt_state = TiltState::Centered;
                     }
                 }
@@ -197,87 +199,5 @@ impl GestureDetector {
         }
 
         None
-    }
-}
-
-/// Button debounce & multi-click state machine for GPIO9
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum ButtonState {
-    Released,
-    Pressed { pressed_at: Instant },
-    WaitingSecondClick { released_at: Instant },
-    LongPressEmitted,
-}
-
-pub struct ButtonDetector {
-    state: ButtonState,
-}
-
-impl Default for ButtonDetector {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ButtonDetector {
-    pub fn new() -> Self {
-        Self {
-            state: ButtonState::Released,
-        }
-    }
-
-    /// Feed current button pressed state (true = pressed, false = released)
-    pub fn update(&mut self, is_pressed: bool, now: Instant) -> Option<GestureEvent> {
-        match self.state {
-            ButtonState::Released => {
-                if is_pressed {
-                    self.state = ButtonState::Pressed { pressed_at: now };
-                }
-                None
-            }
-            ButtonState::Pressed { pressed_at } => {
-                let hold_duration = now.duration_since(pressed_at);
-                if !is_pressed {
-                    // Released before long press
-                    if hold_duration >= Duration::from_millis(1500) {
-                        self.state = ButtonState::Released;
-                        Some(GestureEvent::KeyLongPress)
-                    } else if hold_duration >= Duration::from_millis(20) {
-                        // Valid press, start double-click window
-                        self.state = ButtonState::WaitingSecondClick { released_at: now };
-                        None
-                    } else {
-                        self.state = ButtonState::Released;
-                        None
-                    }
-                } else if hold_duration >= Duration::from_millis(1500) {
-                    // Long press threshold reached while still held -> emit once and wait for physical release
-                    self.state = ButtonState::LongPressEmitted;
-                    Some(GestureEvent::KeyLongPress)
-                } else {
-                    None
-                }
-            }
-            ButtonState::LongPressEmitted => {
-                if !is_pressed {
-                    self.state = ButtonState::Released;
-                }
-                None
-            }
-            ButtonState::WaitingSecondClick { released_at } => {
-                let elapsed = now.duration_since(released_at);
-                if is_pressed {
-                    // Second press within window!
-                    self.state = ButtonState::Released;
-                    Some(GestureEvent::KeyDoubleClick)
-                } else if elapsed >= Duration::from_millis(250) {
-                    // Window expired -> Single short press
-                    self.state = ButtonState::Released;
-                    Some(GestureEvent::KeyShortPress)
-                } else {
-                    None
-                }
-            }
-        }
     }
 }

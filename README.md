@@ -1,54 +1,62 @@
-# island
+# 桌面灵动岛 (Desktop Island)
 
-基于 `esp-generate` 生成的 ESP32-C6 嵌入式固件工程，使用 Rust 的 `no_std` /
-`no_main` 模式编写，运行在 Embassy 异步运行时之上，并集成了 Wi-Fi、BLE 与
-插座式网络协议栈。
+基于 Espressif **ESP32-C6**（微雪 Waveshare ESP32-C6-LCD-1.28 开发板）构建的纯 Rust、`#![no_std]` / `#![no_main]` 嵌入式固件工程与电脑守护服务。工程运行于 Embassy 异步并发运行时之上，实现圆屏分带显存渲染、IMU 急动度敲击与手势物理交互、USB-Serial-JTAG 电脑守护交互、BLE 离席安全感知及 Flash 容灾黑匣子。
 
-## 项目概览
+## 💡 项目定位与核心作用及使用指南
 
-| 项目 | 值 |
-| --- | --- |
-| 目标芯片 | `esp32c6` |
-| 目标硬件 | 微雪 ESP32-C6-LCD-1.28（16 MB Flash，240x240 LCD） |
-| 目标三元组 | `riscv32imac-unknown-none-elf` |
-| Rust 版本 | `stable`（见 `rust-toolchain.toml`） |
-| 语言版本 | edition 2024 |
-| 运行模式 | `#![no_std]` + `#![no_main]`，启用 `alloc` |
-| 构建产物 | `src/bin/main.rs` -> 可执行文件 `island` |
+**Desktop Island（桌面灵动岛）** 是为极客开发者、重度 PC 用户量身打造的**桌面级智能物理交互终端与电脑硬件守护外设**。
 
-## 功能特性
+借助微雪 ESP32-C6-LCD-1.28 的圆形彩屏、6 轴 IMU、BLE 5 射频以及高精度 RTC，本项目在软硬件协同层面解决了多项日常开发与桌面办公的核心痛点，并提供了直观的物理与命令行交互体验：
 
-- **异步运行时**：`esp-rtos` + `embassy-executor`，通过 `#[esp_rtos::main]`
-  启动入口任务。
-- **无线能力**：`esp-radio` 同时启用 `wifi`、`ble`、`coex`，即 Wi-Fi 与
-  BLE 共用同一射频（COEX）。
-- **BLE 协议栈**：`bt-hci` 提供 HCI 控制器，`trouble-host` 提供主机协议栈，
-  当前支持 1 条连接、1 条 L2CAP 通道。
-- **网络协议栈**：`embassy-net` + `smoltcp`，默认启用 DHCPv4、TCP、UDP。
-- **内存分配**：`esp-alloc` 提供全局堆，共两块：64 KiB 可回收 RAM（`reclaimed`）
-  加 64 KiB 常规 RAM。
-- **日志**：`esp-println` 通过 USB-Serial-JTAG 输出，可用 `espflash monitor` 查看。
-- **栈保护**：`-Z stack-protector=all` 与 `force-frame-pointers` 已开启，
-  便于排查栈溢出和获取回溯。
+### 1. 桌面物理级“灵动岛”：主机状态与 AI 任务实体化投射
 
-## 目录结构
+- **解决痛点**：开发过程中，多显示器或全屏工作流常常遮挡系统关键监控与耗时任务。Desktop Island 常驻桌面边缘，实时以弧形仪表呈现 CPU 负载、GPU 占用、内存消耗与电池状态；当 AI Agent 或构建脚本运行时，以脉冲流光呈现深度思考（`Thinking`）、以呼吸环呈现等待人类确认（`WaitConfirm`）、并在构建完成或异常时弹出醒目通知。
+- **🎮 如何使用**：
+  1. **启动 PC 守护程序**（自动流送硬件监控与对齐时钟）：
+     ```sh
+     # 安装依赖：pip install pyserial psutil
+     python3 tools/host_agent.py
+     ```
+     守护服务会自动检测 Type-C 端口，建立全双工通信，并以 2~5Hz 持续刷新桌面屏上的三联系统仪表。
+  2. **在终端、CI 脚本或 AI Agent 流程中注入动态状态**：
+     ```sh
+     # 触发 AI / 耗时编译思考中脉冲
+     python3 tools/host_agent.py --notify "Claude is thinking" --state THINKING --progress 40
 
-```
-.
-├── .cargo/
-│   ├── config.toml      # 目标、runner、rustflags、build-std、环境变量
-│   └── esp-config.toml  # Espressif crate 的运行时配置（[env]）
-├── .github/workflows/   # CI：build / fmt / clippy
-├── docs/
-│   ├── hardware-esp32-c6-lcd-1.28.md  # 目标硬件（微雪 ESP32-C6-LCD-1.28）引脚与资源
-│   └── flashing.md      # espflash 烧录与日志
-├── src/
-│   ├── lib.rs           # 库入口（#![no_std]）
-│   └── bin/main.rs      # 固件入口，包含外设初始化与主循环
-├── build.rs             # 链接脚本与友好的链接期报错提示
-├── Cargo.toml           # 依赖与编译 profile
-└── rust-toolchain.toml  # 固定 stable 工具链、组件与目标
-```
+     # 触发等待人工确认询问
+     python3 tools/host_agent.py --notify "Approve rm -rf build/?" --state WAIT_CONFIRM
+
+     # 任务成功或测试失败弹窗
+     python3 tools/host_agent.py --notify "Cargo Test Passed" --state SUCCESS
+     python3 tools/host_agent.py --notify "Compile Error" --state ERROR
+     ```
+
+### 2. 桌面级免按键物理交互：急动度敲击与空间姿态控制
+
+- **解决痛点**：长时间沉浸于键盘编码或双屏浏览时，频繁伸手抓按键或寻找终端确认极为繁琐。
+- **🎮 如何使用**：
+  - **双击敲击桌面确认（Jerk Tap）**：当屏幕显示 `WaitConfirm` 胶囊时，**在桌面上直接用手指敲击两下**（约 0.3 秒间隔），IMU 探测到震动急动度（Jerk）峰值后立即向 PC 发送批准执行信号（终端会伴随响铃并继续执行任务）。
+  - **物理倾斜切页（Tilt Navigation）**：轻轻将开发板**向左或向右微倾（约 18°）**，即可在【硬件自检仪表】、【灵动岛主视图】与【桌宠治愈视图】之间直观巡航（板载侧边 `BOOT` 键专用于芯片 ROM 烧录 Strapping，不作为业务功能键，全机交互实现 100% 纯物理姿态掌控）。
+  - **朝下扣放免打扰（FaceDown DND）**：开会或休息时，直接将圆屏**面朝下扣在桌面上**，重力向量翻转触发即刻熄屏休眠并开启免打扰；随手翻起重新朝上即刻亮屏恢复。
+
+### 3. 离席自动安全锁屏与在席守护（BLE Presence Watchdog）
+
+- **解决痛点**：离开工位常忘记锁定电脑，导致代码与隐私暴露。
+- **🎮 如何使用**：
+  - 用户随身携带已配对的智能手机或 BLE 手环。
+  - ESP32-C6 固件后台持续监听指定设备的广播 RSSI，并运用 EMA（指数滑动平均）平滑滤波。
+  - 当用户起身离开工位（信号衰减并超时判决为 `AWAY`），固件向电脑发送事件，`tools/host_agent.py` 自动调用系统原生命令执行锁屏（macOS: `pmset displaysleepnow`，Linux: `loginctl lock-session`，Windows: `LockWorkStation`）；用户回到工位即刻唤醒亮屏。
+
+### 4. 离线自主待机与工业级持久化容灾
+
+- **解决痛点**：外设在主机断电或断连后容易黑屏瘫痪，发生死机时缺乏硬件排障证据。
+- **🎮 如何使用**：
+  - **无缝离线待机**：直接拔下 Type-C 线或电脑休眠，内置 10 秒看门狗超时后，设备自主维持低功耗走时，由板载 PCF85063 硬件 RTC 与纽扣电池自主精确走时；重新插上电脑后秒级恢复桌面灵动岛。
+  - **导出黑匣子日志**：遇到异常掉电或系统断言异常后，重新插上电脑并运行：
+    ```sh
+    python3 tools/host_agent.py --dump-logs
+    ```
+    即可秒级从片内 Flash 导出最后保存的 64 字节灾难现场快照用于分析。
 
 ## 环境准备
 
@@ -59,10 +67,10 @@
    rustup toolchain install stable --component rust-src --target riscv32imac-unknown-none-elf
    ```
 
-3. 安装烧录工具：
+3. 安装烧录工具（提供 `espflash` CLI，用于 `cargo run` 自动烧录与监视）：
 
    ```sh
-   cargo install cargo-espflash --locked
+   cargo install espflash --locked
    ```
 
 4. 硬件准备：一块微雪 ESP32-C6-LCD-1.28，用板载 Type-C 口连接电脑即可，
@@ -136,27 +144,6 @@ CI 会执行上述三类检查（见 `.github/workflows/rust_ci.yml`），使用
 - **用户/运行时配置**放在 `.cargo/esp-config.toml` 的 `[env]` 段中；
   Espressif 系列 crate 的可用变量可通过 `esp-config` 查看与设置。
 - 避免在源码中硬编码这些配置，统一走上述两个文件。
-
-## 修改入口任务
-
-主逻辑位于 `src/bin/main.rs` 的 `#[esp_rtos::main]` 函数：
-
-1. 初始化 CPU 时钟与外设；
-2. 注册堆分配器；
-3. 启动 `esp-rtos` 调度器；
-4. 初始化 Wi-Fi 控制器与 BLE 传输/主机栈；
-5. 在 `loop` 中周期性输出日志。
-
-`main.rs` 顶部的注释记录了本次生成所用的参数：
-
-```
-generator parameters: -o esp32c6 -o esp32c6-wroom-1 -o unstable-hal -o alloc -o embassy
-                      -o ble-trouble -o wifi -o stack-smashing-protection -o probe-rs
-                      -o ci -o agents -o vscode -o zed
-```
-
-修改与生成选项相关的代码前，请先确认这些参数的语义。注意其中
-`-o probe-rs` 是生成时的初始选择，本工程之后已统一改用 `espflash`。
 
 ## 常见问题
 

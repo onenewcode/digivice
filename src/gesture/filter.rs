@@ -1,10 +1,33 @@
 //! IMU filtering, zero-bias calibration, and attitude solving
 
 use crate::board::ImuSample;
-use core::f32::consts::PI;
-use libm::{atan2f, fabsf};
+use libm::fabsf;
 
-const RAD_TO_DEG: f32 = 180.0 / PI;
+/// Zero-FPU fast rational arctangent approximation in degrees.
+/// Typical absolute error is below 0.3 degrees across the 360 degree space.
+/// Replaces heavy `libm::atan2f` software emulation routines on RISC-V RV32IMAC cores.
+#[inline]
+pub fn fast_atan2_deg(y: f32, x: f32) -> f32 {
+    if x == 0.0 && y == 0.0 {
+        return 0.0;
+    }
+    let ax = fabsf(x);
+    let ay = fabsf(y);
+    let (octant_swap, r) = if ax > ay {
+        (false, ay / ax)
+    } else {
+        (true, ax / ay)
+    };
+    // Hastings rational approximation: atan(r) in degrees on [0, 1]
+    let angle_sub = (r * 57.295_78) / (1.0 + 0.280_86 * r * r);
+    let angle = if octant_swap {
+        90.0 - angle_sub
+    } else {
+        angle_sub
+    };
+    let signed_angle = if x >= 0.0 { angle } else { 180.0 - angle };
+    if y < 0.0 { -signed_angle } else { signed_angle }
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Attitude {
@@ -49,7 +72,7 @@ impl ImuFilter {
             gy_lpf: 0.0,
             gz_lpf: 1000.0,
             heading: 0.0,
-            alpha: 0.15,
+            alpha: 0.28,
             calibrated: false,
         }
     }
@@ -97,9 +120,9 @@ impl ImuFilter {
         self.gy_lpf = self.gy_lpf + self.alpha * (ay - self.gy_lpf);
         self.gz_lpf = self.gz_lpf + self.alpha * (az - self.gz_lpf);
 
-        // Calculate Roll and Pitch using atan2f
-        let roll_deg = atan2f(self.gx_lpf, self.gz_lpf) * RAD_TO_DEG;
-        let pitch_deg = atan2f(self.gy_lpf, self.gz_lpf) * RAD_TO_DEG;
+        // Calculate Roll and Pitch using fast rational approximation
+        let roll_deg = fast_atan2_deg(self.gx_lpf, self.gz_lpf);
+        let pitch_deg = fast_atan2_deg(self.gy_lpf, self.gz_lpf);
 
         // Heading integration: only integrate when board is flat on table (|gz| > 750mg)
         // and rotation speed is above deadzone (|gz_dps| > 2.0 dps) to eliminate drift

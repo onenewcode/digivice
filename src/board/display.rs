@@ -23,6 +23,7 @@ pub const DISPLAY_WIDTH: u16 = 240;
 pub const DISPLAY_HEIGHT: u16 = 240;
 pub const BAND_HEIGHT: usize = 20;
 pub const NUM_BANDS: usize = 12; // 240 / 20 = 12 bands
+pub const BAND_BUFFER_SIZE: usize = (DISPLAY_WIDTH as usize) * BAND_HEIGHT;
 
 pub type DisplayInterface<'d> =
     SPIInterface<ExclusiveDevice<Spi<'d, Blocking>, Output<'d>, NoDelay>, Output<'d>>;
@@ -78,30 +79,36 @@ impl<'d> Backlight<'d> {
     }
 }
 
-/// GC9A01 Display Wrapper using band buffer
+pub struct DisplayPins<'d> {
+    pub sck: GPIO11<'d>,
+    pub mosi: GPIO21<'d>,
+    pub cs: GPIO10<'d>,
+    pub dc: GPIO19<'d>,
+    pub rst: GPIO20<'d>,
+    pub sd_cs: GPIO15<'d>,
+}
+
+/// GC9A01 Display Wrapper using statically allocated band buffer reference.
+/// Keeping the 9.6KB buffer out of the struct prevents large stack frame moves.
 pub struct BandDisplay<'d> {
     pub driver: Gc9a01<DisplayInterface<'d>, DisplayResolution240x240, BasicMode>,
-    pub band_buffer: [u16; (DISPLAY_WIDTH as usize) * BAND_HEIGHT],
+    pub band_buffer: &'d mut [u16; BAND_BUFFER_SIZE],
     _sd_cs: Output<'d>,
 }
 
 impl<'d> BandDisplay<'d> {
     pub fn new(
         spi2: SPI2<'d>,
-        sck: GPIO11<'d>,
-        mosi: GPIO21<'d>,
-        cs: GPIO10<'d>,
-        dc: GPIO19<'d>,
-        rst: GPIO20<'d>,
-        sd_cs: GPIO15<'d>,
+        pins: DisplayPins<'d>,
+        band_buffer: &'d mut [u16; BAND_BUFFER_SIZE],
     ) -> Self {
         // Deselect TF card SPI CS to prevent bus contention
-        let mut sd_cs_pin = Output::new(sd_cs, Level::High, OutputConfig::default());
+        let mut sd_cs_pin = Output::new(pins.sd_cs, Level::High, OutputConfig::default());
         sd_cs_pin.set_high();
 
-        let cs_pin = Output::new(cs, Level::High, OutputConfig::default());
-        let dc_pin = Output::new(dc, Level::High, OutputConfig::default());
-        let mut rst_pin = Output::new(rst, Level::High, OutputConfig::default());
+        let cs_pin = Output::new(pins.cs, Level::High, OutputConfig::default());
+        let dc_pin = Output::new(pins.dc, Level::High, OutputConfig::default());
+        let mut rst_pin = Output::new(pins.rst, Level::High, OutputConfig::default());
 
         let spi = Spi::new(
             spi2,
@@ -110,24 +117,27 @@ impl<'d> BandDisplay<'d> {
                 .with_mode(Mode::_0),
         )
         .expect("Failed to init SPI")
-        .with_sck(sck)
-        .with_mosi(mosi);
+        .with_sck(pins.sck)
+        .with_mosi(pins.mosi);
 
         let spi_device =
             ExclusiveDevice::new_no_delay(spi, cs_pin).expect("Failed to create SpiDevice");
         let di = SPIInterface::new(spi_device, dc_pin);
 
-        let mut driver = Gc9a01::new(di, DisplayResolution240x240, DisplayRotation::Rotate0);
+        let mut driver = Gc9a01::new(di, DisplayResolution240x240, DisplayRotation::Rotate180);
 
         let mut delay = esp_hal::delay::Delay::new();
         driver
             .reset(&mut rst_pin, &mut delay)
             .expect("Failed to reset display");
         driver.init(&mut delay).expect("Failed to init display");
+        driver
+            .set_display_rotation(DisplayRotation::Rotate180)
+            .expect("Failed to set display rotation");
 
         let mut display = Self {
             driver,
-            band_buffer: [0u16; (DISPLAY_WIDTH as usize) * BAND_HEIGHT],
+            band_buffer,
             _sd_cs: sd_cs_pin,
         };
 
@@ -168,7 +178,7 @@ impl<'d> BandDisplay<'d> {
         for band in 0..NUM_BANDS {
             let y_offset = (band * BAND_HEIGHT) as i32;
             let mut target = BandTarget {
-                buffer: &mut self.band_buffer,
+                buffer: self.band_buffer,
                 y_offset,
             };
             target.clear(bg_color).ok();
@@ -188,7 +198,7 @@ impl<'d> BandDisplay<'d> {
         for band in start_band..=end_band {
             let y_offset = (band * BAND_HEIGHT) as i32;
             let mut target = BandTarget {
-                buffer: &mut self.band_buffer,
+                buffer: self.band_buffer,
                 y_offset,
             };
             target.clear(bg_color).ok();
@@ -200,7 +210,7 @@ impl<'d> BandDisplay<'d> {
 
 /// Embedded-graphics DrawTarget for a single horizontal band
 pub struct BandTarget<'a> {
-    pub buffer: &'a mut [u16; (DISPLAY_WIDTH as usize) * BAND_HEIGHT],
+    pub buffer: &'a mut [u16; BAND_BUFFER_SIZE],
     pub y_offset: i32,
 }
 

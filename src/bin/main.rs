@@ -13,28 +13,37 @@ extern crate alloc;
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::usb::usb_serial_jtag::UsbSerialJtag;
+use esp_radio::ble::controller::BleConnector;
 
 use embassy_executor::Spawner;
+use embassy_futures::select::{Either, Either4, select, select4};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::signal::Signal;
-use embassy_time::{Duration, Instant, Timer};
+use embassy_sync::{channel::Channel, signal::Signal};
+use embassy_time::{Duration, Instant, Ticker, Timer};
 use esp_println::println;
+use trouble_host::prelude::{
+    Central, DefaultPacketPool, EventHandler, ExternalController, LeAdvReportsIter,
+    LeExtAdvReportsIter, Runner, Scanner,
+};
 
+use island::app::AppStateMachine;
 use island::board::{
-    Board, BoardPeripherals, DateTime, ImuSample,
+    Board, BoardPeripherals, DateTime, ImuAttitudeSnapshot, PowerStatus,
     display::{Backlight, BandDisplay},
     power_key::PowerKeyMonitor,
 };
-use island::gesture::detector::{ButtonDetector, GestureDetector};
+use island::gesture::GESTURE_CHANNEL;
+use island::gesture::detector::GestureDetector;
 use island::gesture::filter::ImuFilter;
-use island::gesture::{GESTURE_CHANNEL, GestureEvent};
-use island::proto::usb_task::{DEVICE_EVENT_CHANNEL, DeviceEvent, HOST_PACKET_CHANNEL, UsbLink};
-use island::proto::{ActionState, HostPacket, TimeSync};
-use island::radio::RADIO_REPORT_CHANNEL;
-use island::storage::DeviceConfig;
-use island::ui::clock_view::render_clock;
+use island::proto::usb_task::{DEVICE_EVENT_CHANNEL, HOST_PACKET_CHANNEL, UsbRxLink, UsbTxLink};
+use island::proto::{ActionState, DeviceEvent, TimeSync};
+use island::radio::{
+    BLE_ADVERTISEMENT_CHANNEL, BleAdvertisement, BlePresenceTracker, BleTargetCommand,
+    RADIO_REPORT_CHANNEL, RADIO_TARGET_SIGNAL, RadioReport, TargetBinding, TargetBindingState,
+};
+use island::storage::{BlackboxSnapshot, DeviceConfig, StorageManager};
 use island::ui::island_view::render_island;
-use island::ui::radar_view::render_radar;
+use island::ui::pet_view::render_pet;
 use island::ui::selftest_view::render_selftest;
 use island::ui::{COLOR_BG, UiState, ViewMode};
 use static_cell::StaticCell;
@@ -47,19 +56,72 @@ fn panic(panic_info: &core::panic::PanicInfo) -> ! {
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-// Inter-task Signals
+// Inter-task Signals (Strongly-typed to eliminate Boolean Blindness & tuple ambiguity)
 pub static UI_STATE_SIGNAL: Signal<CriticalSectionRawMutex, UiState> = Signal::new();
 pub static TIME_SIGNAL: Signal<CriticalSectionRawMutex, DateTime> = Signal::new();
 pub static TIME_SYNC_SIGNAL: Signal<CriticalSectionRawMutex, TimeSync> = Signal::new();
-pub static POWER_SIGNAL: Signal<CriticalSectionRawMutex, (u16, bool)> = Signal::new();
-pub static IMU_SIGNAL: Signal<CriticalSectionRawMutex, (ImuSample, f32, f32, f32)> = Signal::new();
+pub static POWER_SIGNAL: Signal<CriticalSectionRawMutex, PowerStatus> = Signal::new();
+pub static IMU_SIGNAL: Signal<CriticalSectionRawMutex, ImuAttitudeSnapshot> = Signal::new();
 
 static DISPLAY_CELL: StaticCell<BandDisplay<'static>> = StaticCell::new();
 static BACKLIGHT_CELL: StaticCell<Backlight<'static>> = StaticCell::new();
+static BLE_HOST: StaticCell<
+    trouble_host::Stack<'static, ExternalController<BleConnector<'static>, 1>, DefaultPacketPool>,
+> = StaticCell::new();
+static BLE_HOST_RESOURCES: StaticCell<
+    trouble_host::HostResources<
+        ExternalController<BleConnector<'static>, 1>,
+        DefaultPacketPool,
+        1,
+        1,
+    >,
+> = StaticCell::new();
+static STORAGE_COMMAND_CHANNEL: Channel<CriticalSectionRawMutex, StorageCommand, 8> =
+    Channel::new();
+static STORAGE_OUTCOME_CHANNEL: Channel<CriticalSectionRawMutex, StorageOutcome, 8> =
+    Channel::new();
+static TARGET_APPLIED_SIGNAL: Signal<CriticalSectionRawMutex, BleTargetCommand> = Signal::new();
+
+#[derive(Clone, Copy)]
+enum StorageCommand {
+    Save(DeviceConfig),
+    Dump(BlackboxSnapshot),
+}
+
+#[derive(Clone, Copy)]
+enum StorageOutcome {
+    Saved(DeviceConfig),
+    SaveFailed(DeviceConfig),
+    Dumped,
+}
+
+struct AdvertisementHandler;
+
+impl EventHandler for AdvertisementHandler {
+    fn on_adv_reports(&self, reports: LeAdvReportsIter<'_>) {
+        for report in reports.flatten() {
+            let advertisement = BleAdvertisement {
+                addr: report.addr.into_inner(),
+                rssi: report.rssi,
+            };
+            let _ = BLE_ADVERTISEMENT_CHANNEL.try_send(advertisement);
+        }
+    }
+
+    fn on_ext_adv_reports(&self, reports: LeExtAdvReportsIter<'_>) {
+        for report in reports.flatten() {
+            let advertisement = BleAdvertisement {
+                addr: report.addr.into_inner(),
+                rssi: report.rssi,
+            };
+            let _ = BLE_ADVERTISEMENT_CHANNEL.try_send(advertisement);
+        }
+    }
+}
 
 #[allow(
     clippy::large_stack_frames,
-    reason = "it's not unusual to allocate larger buffers etc. in main"
+    reason = "esp_rtos::main macro expands to runtime startup futures"
 )]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
@@ -78,9 +140,8 @@ async fn main(spawner: Spawner) -> ! {
     println!("Embassy OS runtime started!");
 
     // 1. Initialize Board Peripherals
-    // Hands over ownership of all required hardware pins including strapping/flash pins,
-    // which are consumed and sealed into an inaccessible type sink.
     let board = Board::init(BoardPeripherals {
+        flash: peripherals.FLASH,
         spi2: peripherals.SPI2,
         ledc: peripherals.LEDC,
         i2c0: peripherals.I2C0,
@@ -100,45 +161,78 @@ async fn main(spawner: Spawner) -> ! {
         gpio20: peripherals.GPIO20,
         gpio21: peripherals.GPIO21,
         gpio23: peripherals.GPIO23,
-        // Type-level sealing of internal SPI flash & strapping pins
-        gpio24: peripherals.GPIO24,
-        gpio25: peripherals.GPIO25,
-        gpio26: peripherals.GPIO26,
-        gpio27: peripherals.GPIO27,
-        gpio28: peripherals.GPIO28,
-        gpio29: peripherals.GPIO29,
-        gpio30: peripherals.GPIO30,
     });
     let display = DISPLAY_CELL.init(board.display);
     let backlight = BACKLIGHT_CELL.init(board.backlight);
 
-    // 2. Initialize Flash Storage & load config
-    let dev_config = DeviceConfig::default();
+    // 2. Initialize Flash Storage & load config using atomic double-buffered ping-pong
+    let mut storage = board.storage;
+    let dev_config = storage.load_config();
+    let initial_target = TargetBinding::try_from(dev_config.ble_target_hash).ok();
     println!(
-        "Device configuration loaded (magic=0x{:08X})",
-        dev_config.magic
+        "Device configuration loaded (magic=0x{:08X}, seq={})",
+        dev_config.magic(),
+        dev_config.seq
     );
 
     // 3. Initialize USB-Serial-JTAG for host communications (direct ownership move, no unsafe steal)
     let usb = UsbSerialJtag::new(peripherals.USB_DEVICE).into_async();
     let (usb_rx, usb_tx) = usb.split();
-    let usb_link = UsbLink::new(usb_rx, usb_tx);
+    let usb_rx_link = UsbRxLink::new(usb_rx);
+    let usb_tx_link = UsbTxLink::new(usb_tx);
 
-    // 4. Spawn Background Tasks
-    spawner.spawn(sensor_task(board.imu, board.power_key).unwrap());
-    spawner.spawn(usb_task(usb_link).unwrap());
-    spawner.spawn(rtc_power_task(board.rtc).unwrap());
-    spawner.spawn(ui_render_task(display, backlight).unwrap());
-    spawner.spawn(app_state_task(dev_config).unwrap());
+    // 4. Initialize BLE before moving the radio peripheral into its task.
+    let ble_transport = BleConnector::new(peripherals.BT, Default::default())
+        .expect("Failed to initialize BLE controller");
+    let ble_controller = ExternalController::<_, 1>::new(ble_transport);
+    let resources = BLE_HOST_RESOURCES.init(trouble_host::HostResources::new());
+    let stack = BLE_HOST.init(trouble_host::new(ble_controller, resources).build());
+    let central = stack.central();
+    let runner = stack.runner();
 
-    println!("All subsystem tasks spawned successfully!");
+    // 5. Spawn Background Tasks with descriptive error boundaries
+    spawner.spawn(
+        ble_runner_task(runner).expect("Failed to create ble_runner_task: executor pool exhausted"),
+    );
+    spawner.spawn(
+        ble_scan_task(central).expect("Failed to create ble_scan_task: executor pool exhausted"),
+    );
+    spawner.spawn(
+        sensor_task(board.imu, board.power_key)
+            .expect("Failed to create sensor_task: executor pool exhausted"),
+    );
+    spawner.spawn(
+        usb_rx_task(usb_rx_link).expect("Failed to create usb_rx_task: executor pool exhausted"),
+    );
+    spawner.spawn(
+        usb_tx_task(usb_tx_link).expect("Failed to create usb_tx_task: executor pool exhausted"),
+    );
+    spawner.spawn(
+        rtc_power_task(board.rtc)
+            .expect("Failed to create rtc_power_task: executor pool exhausted"),
+    );
+    spawner.spawn(
+        ui_render_task(display, backlight)
+            .expect("Failed to create ui_render_task: executor pool exhausted"),
+    );
+    spawner.spawn(
+        app_state_task(dev_config)
+            .expect("Failed to create app_state_task: executor pool exhausted"),
+    );
+    spawner.spawn(
+        radio_presence_task(initial_target)
+            .expect("Failed to create radio_presence_task: executor pool exhausted"),
+    );
+    spawner.spawn(
+        storage_task(storage).expect("Failed to create storage_task: executor pool exhausted"),
+    );
 
     // The entry task has no periodic work; keep it alive while Embassy runs spawned tasks.
     core::future::pending::<()>().await;
     unreachable!("the pending future never completes");
 }
 
-/// Task 1: Sensor & Gestures (QMI8658 + BOOT button)
+/// Task 1: Sensor & Gestures (QMI8658 IMU + Power Rail Monitor)
 #[allow(
     clippy::large_stack_frames,
     reason = "Sensor calibration loop and attitude filter state"
@@ -150,30 +244,37 @@ async fn sensor_task(
 ) -> ! {
     let mut filter = ImuFilter::new();
     let mut detector = GestureDetector::new();
-    let mut button_detector = ButtonDetector::new();
 
-    // Initial gyro stationary calibration (accumulate sum directly)
-    let mut sum_gx: i64 = 0;
-    let mut sum_gy: i64 = 0;
-    let mut sum_gz: i64 = 0;
-    for _ in 0..50 {
-        if let Ok(sample) = imu.read_sample() {
-            sum_gx += sample.gx_mdps as i64;
-            sum_gy += sample.gy_mdps as i64;
-            sum_gz += sample.gz_mdps as i64;
+    // Initial gyro stationary calibration (accumulate sum directly if IMU is available)
+    if imu.is_available() {
+        let mut sum_gx: i64 = 0;
+        let mut sum_gy: i64 = 0;
+        let mut sum_gz: i64 = 0;
+        let mut valid_samples: i64 = 0;
+        for _ in 0..50 {
+            if let Ok(sample) = imu.read_sample() {
+                sum_gx += sample.gx_mdps as i64;
+                sum_gy += sample.gy_mdps as i64;
+                sum_gz += sample.gz_mdps as i64;
+                valid_samples += 1;
+            }
+            Timer::after(Duration::from_millis(10)).await;
         }
-        Timer::after(Duration::from_millis(10)).await;
+        if valid_samples > 0 {
+            filter.set_gyro_bias(
+                (sum_gx / valid_samples) as i32,
+                (sum_gy / valid_samples) as i32,
+                (sum_gz / valid_samples) as i32,
+            );
+        }
     }
-    filter.set_gyro_bias(
-        (sum_gx / 50) as i32,
-        (sum_gy / 50) as i32,
-        (sum_gz / 50) as i32,
-    );
 
     let mut last_power_sample = Instant::now();
     let mut last_imu_emit = Instant::now();
+    let mut ticker = Ticker::every(Duration::from_millis(5));
 
     loop {
+        ticker.next().await;
         let now = Instant::now();
 
         // 1. Read 6-DOF sample
@@ -183,53 +284,141 @@ async fn sensor_task(
                 GESTURE_CHANNEL.send(event).await;
             }
 
-            // Emit attitude update to UI every 50ms (20Hz)
-            if now.duration_since(last_imu_emit) >= Duration::from_millis(50) {
+            // Emit attitude update to UI every 30ms (~33Hz smooth tracking)
+            if now.duration_since(last_imu_emit) >= Duration::from_millis(30) {
                 last_imu_emit = now;
-                IMU_SIGNAL.signal((
+                IMU_SIGNAL.signal(ImuAttitudeSnapshot {
                     sample,
-                    attitude.roll_deg,
-                    attitude.pitch_deg,
-                    attitude.heading_deg,
-                ));
+                    roll_deg: attitude.roll_deg,
+                    pitch_deg: attitude.pitch_deg,
+                    heading_deg: attitude.heading_deg,
+                    imu_status: imu.status(),
+                });
             }
+        } else if now.duration_since(last_imu_emit) >= Duration::from_millis(30) {
+            // Broadcast hardware status even if read failed so UI reflects error
+            last_imu_emit = now;
+            IMU_SIGNAL.signal(ImuAttitudeSnapshot {
+                sample: island::board::ImuSample::default(),
+                roll_deg: 0.0,
+                pitch_deg: 0.0,
+                heading_deg: 0.0,
+                imu_status: imu.status(),
+            });
         }
 
-        // 2. Poll BOOT key
-        let is_pressed = power_key.is_boot_pressed();
-        if let Some(event) = button_detector.update(is_pressed, now) {
-            GESTURE_CHANNEL.send(event).await;
-        }
-
-        // 3. Periodic Power Rail sampling (every 200ms)
+        // 2. Periodic Power Rail sampling (every 200ms)
         if now.duration_since(last_power_sample) >= Duration::from_millis(200) {
             last_power_sample = now;
-            let v_rail = power_key.sample_v_rail_mv();
-            let bc_high = power_key.bc_state_high();
-            POWER_SIGNAL.signal((v_rail, bc_high));
+            POWER_SIGNAL.signal(power_key.read_status());
         }
-
-        Timer::after(Duration::from_millis(5)).await;
     }
 }
 
-/// Task 2: USB-Serial-JTAG Communication & Host Watchdog
+/// Task 2A: USB-Serial-JTAG RX Ingestion Stream
 #[embassy_executor::task]
-async fn usb_task(mut usb_link: UsbLink<'static>) -> ! {
+async fn usb_rx_task(mut rx_link: UsbRxLink<'static>) -> ! {
     loop {
-        // Read incoming commands from host PC
-        usb_link.process_rx_chunk().await;
+        // Asynchronously suspends when FIFO is empty without starving TX or central coordinator
+        rx_link.process_rx_chunk().await;
+    }
+}
 
-        let now = Instant::now();
-        // Check 10s host watchdog
-        let _connected = usb_link.check_watchdog(now);
+/// Task 2B: USB-Serial-JTAG TX Event Dispatcher
+#[embassy_executor::task]
+async fn usb_tx_task(mut tx_link: UsbTxLink<'static>) -> ! {
+    loop {
+        // Wakes up on event arrival and transmits frame immediately
+        let evt = DEVICE_EVENT_CHANNEL.receive().await;
+        tx_link.send_event(&evt).await;
+    }
+}
 
-        // Send queued outgoing events to Host
-        while let Ok(evt) = DEVICE_EVENT_CHANNEL.try_receive() {
-            usb_link.send_event(&evt).await;
+/// Task: Serialize configuration updates through a single flash owner.
+#[allow(
+    clippy::large_stack_frames,
+    reason = "Flash storage and snapshot serialization are owned by this single task"
+)]
+#[embassy_executor::task]
+async fn storage_task(mut storage: StorageManager<'static>) -> ! {
+    loop {
+        let command = STORAGE_COMMAND_CHANNEL.receive().await;
+        match command {
+            StorageCommand::Save(config) => match storage.save_config(&config) {
+                Ok(saved) => {
+                    STORAGE_OUTCOME_CHANNEL
+                        .send(StorageOutcome::Saved(saved))
+                        .await
+                }
+                Err(err) => {
+                    println!("WARN: Failed to persist device config: {}", err);
+                    STORAGE_OUTCOME_CHANNEL
+                        .send(StorageOutcome::SaveFailed(config))
+                        .await;
+                }
+            },
+            StorageCommand::Dump(snapshot) => match storage.record_snapshot(&snapshot) {
+                Ok(_) => STORAGE_OUTCOME_CHANNEL.send(StorageOutcome::Dumped).await,
+                Err(err) => println!("WARN: Failed to write blackbox snapshot: {}", err),
+            },
         }
+    }
+}
 
-        Timer::after(Duration::from_millis(10)).await;
+const BLE_SCAN_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Task: BLE HCI host runner.
+#[allow(
+    clippy::large_stack_frames,
+    reason = "Trouble host runner owns the HCI receive buffers"
+)]
+#[embassy_executor::task]
+async fn ble_runner_task(
+    mut runner: Runner<'static, ExternalController<BleConnector<'static>, 1>, DefaultPacketPool>,
+) -> ! {
+    let _ = runner.run_with_handler(&AdvertisementHandler).await;
+    unreachable!("BLE host runner exited");
+}
+
+/// Task: BLE scan session lifecycle.
+#[embassy_executor::task]
+async fn ble_scan_task(
+    central: Central<'static, ExternalController<BleConnector<'static>, 1>, DefaultPacketPool>,
+) -> ! {
+    let scan_config = trouble_host::connection::ScanConfig {
+        active: false,
+        interval: Duration::from_millis(100),
+        window: Duration::from_millis(100),
+        filter_duplicates: bt_hci::param::FilterDuplicates::Disabled,
+        ..Default::default()
+    };
+
+    let mut scanner = Scanner::new(central);
+    loop {
+        let session = match scanner.scan(&scan_config).await {
+            Ok(session) => session,
+            Err(err) => {
+                println!("WARN: Failed to start BLE scanner: {:?}", err);
+                Timer::after(BLE_SCAN_IDLE_TIMEOUT).await;
+                continue;
+            }
+        };
+        Timer::after(BLE_SCAN_IDLE_TIMEOUT).await;
+        drop(session);
+    }
+}
+
+#[inline]
+fn dispatch_device_event(evt: DeviceEvent) {
+    if DEVICE_EVENT_CHANNEL.try_send(evt).is_err() {
+        println!("WARN: DEVICE_EVENT_CHANNEL full, dropped event: {}", evt);
+    }
+}
+
+#[inline]
+fn enqueue_storage_command(command: StorageCommand) {
+    if STORAGE_COMMAND_CHANNEL.try_send(command).is_err() {
+        println!("WARN: STORAGE_COMMAND_CHANNEL full, dropped storage command");
     }
 }
 
@@ -238,18 +427,33 @@ async fn usb_task(mut usb_link: UsbLink<'static>) -> ! {
 async fn rtc_power_task(
     mut rtc: island::board::Pcf85063<island::board::SharedI2cDevice<'static>>,
 ) -> ! {
+    // Broadcast initial time
+    TIME_SIGNAL.signal(rtc.get_datetime());
+
     loop {
-        let dt = rtc.get_datetime();
-        TIME_SIGNAL.signal(dt);
-
-        // Check for host sync time requests dispatched to RTC
-        if let Some(sync) = TIME_SYNC_SIGNAL.try_take() {
-            let total_epoch_with_tz = (sync.epoch as i64 + (sync.tz_offset_min as i64) * 60) as u64;
-            let new_dt = island::board::rtc::epoch_to_datetime(total_epoch_with_tz);
-            let _ = rtc.set_datetime(&new_dt);
+        match select(
+            Timer::after(Duration::from_millis(500)),
+            TIME_SYNC_SIGNAL.wait(),
+        )
+        .await
+        {
+            Either::First(_) => {
+                let dt = rtc.get_datetime();
+                TIME_SIGNAL.signal(dt);
+            }
+            Either::Second(sync) => {
+                let offset_sec = (sync.tz_offset_min as i64) * 60;
+                let total_epoch_with_tz = if offset_sec < 0 {
+                    sync.epoch.saturating_sub((-offset_sec) as u64)
+                } else {
+                    sync.epoch.saturating_add(offset_sec as u64)
+                };
+                let new_dt = island::board::rtc::epoch_to_datetime(total_epoch_with_tz);
+                let _ = rtc.set_datetime(&new_dt);
+                // Immediately emit the synchronized time to eliminate sync latency
+                TIME_SIGNAL.signal(new_dt);
+            }
         }
-
-        Timer::after(Duration::from_millis(500)).await;
     }
 }
 
@@ -264,195 +468,247 @@ async fn ui_render_task(
     backlight: &'static mut Backlight<'static>,
 ) -> ! {
     let mut ui_state = UiState::default();
-    let mut breath_phase: f32 = 0.0;
+    let mut breath_idx: usize = 0;
+    let mut needs_render = true;
+
+    // 1.2Hz Breathing pulse between 25% and 100% using precomputed integer LUT (Zero-FPU)
+    // 28 samples * 30ms interval = 840ms period (~1.19Hz)
+    const BREATHING_LUT: [u8; 28] = [
+        62, 71, 79, 86, 92, 96, 99, 100, 99, 96, 92, 86, 79, 71, 62, 53, 45, 38, 32, 28, 25, 26,
+        28, 32, 38, 45, 53, 58,
+    ];
 
     loop {
         // Fetch latest state if updated
         if let Some(new_state) = UI_STATE_SIGNAL.try_take() {
             ui_state = new_state;
+            needs_render = true;
         }
+
+        let is_breathing = ui_state.action.state() == ActionState::WaitConfirm;
 
         // Backlight PWM Management
-        if ui_state.is_facedown {
+        if ui_state.is_facedown() {
             backlight.set_brightness(0);
-        } else if ui_state.action.state == ActionState::WaitConfirm {
-            // 1.2Hz Breathing sine curve between 25% and 100%
-            breath_phase += 0.15;
-            if breath_phase >= core::f32::consts::TAU {
-                breath_phase -= core::f32::consts::TAU;
-            }
-            let sine = libm::sinf(breath_phase); // -1.0..1.0
-            let brightness = 25.0 + ((sine + 1.0) / 2.0) * 75.0;
-            backlight.set_brightness(brightness as u8);
-        } else if !ui_state.ble_near || ui_state.mode == ViewMode::StandbyClock {
-            backlight.set_brightness(12);
+        } else if is_breathing {
+            breath_idx = (breath_idx + 1) % BREATHING_LUT.len();
+            backlight.set_brightness(BREATHING_LUT[breath_idx]);
         } else {
-            backlight.set_brightness(80);
+            backlight.set_brightness(ui_state.backlight_pct);
         }
 
-        // Increment radar sweep angle
-        ui_state.radar_sweep_angle = (ui_state.radar_sweep_angle + 6) % 360;
+        // Render Frame based on active ViewMode:
+        // Skip heavy SPI rendering when device is face down (screen turned off onto desk)
+        if needs_render && !ui_state.is_facedown() {
+            let mode = ui_state.mode;
+            display.render_full_frame(COLOR_BG, |target| match mode {
+                ViewMode::SelfTest => render_selftest(target, &ui_state),
+                ViewMode::Island => render_island(target, &ui_state),
+                ViewMode::Pet => render_pet(target, &ui_state),
+            });
+            needs_render = false;
+        }
 
-        // Render Frame based on active ViewMode
-        let mode = ui_state.mode;
-        display.render_full_frame(COLOR_BG, |target| match mode {
-            ViewMode::SelfTest => render_selftest(target, &ui_state),
-            ViewMode::Island => render_island(target, &ui_state),
-            ViewMode::Radar => render_radar(target, &ui_state),
-            ViewMode::StandbyClock => render_clock(target, &ui_state),
-        });
-
-        Timer::after(Duration::from_millis(30)).await;
+        // Energy-efficient dirty-gated sleep:
+        // If fluid animation is required (WaitConfirm pulse or Pet mode), step at 30ms;
+        // otherwise, wait reactively for new state arrivals (with 500ms safety timeout for watchdogs).
+        if ui_state.requires_fluid_animation() {
+            Timer::after(Duration::from_millis(30)).await;
+        } else {
+            match select(
+                UI_STATE_SIGNAL.wait(),
+                Timer::after(Duration::from_millis(500)),
+            )
+            .await
+            {
+                Either::First(new_state) => {
+                    ui_state = new_state;
+                    needs_render = true;
+                }
+                Either::Second(_) => {}
+            }
+        }
     }
 }
 
-/// Task 5: Central Application State Machine
+/// Task 5: Central Application State Machine & Reactive Event Coordinator
 #[allow(
     clippy::large_stack_frames,
-    reason = "Central application coordinator maintains state snapshots and channels"
+    reason = "Central application coordinator maintains state machine across await points"
 )]
 #[embassy_executor::task]
-async fn app_state_task(_config: DeviceConfig) -> ! {
-    let mut state = UiState {
-        mode: ViewMode::SelfTest, // Start in Stage 1 SelfTest mode!
-        ..Default::default()
-    };
-    let mut last_heartbeat = Instant::now();
-    let mut uptime_sec: u32 = 0;
+async fn app_state_task(config: DeviceConfig) -> ! {
+    let mut coordinator = AppStateMachine::new(config);
+    let mut ticker = Ticker::every(Duration::from_millis(25));
 
     loop {
-        // Update time if signaled
-        if let Some(dt) = TIME_SIGNAL.try_take() {
-            state.datetime = dt;
-        }
-
-        // Update power rail if signaled
-        if let Some((v_rail, bc_high)) = POWER_SIGNAL.try_take() {
-            state.v_rail_mv = v_rail;
-            state.bc_state_high = bc_high;
-        }
-
-        // Update IMU telemetry if signaled
-        if let Some((sample, roll, pitch, hdg)) = IMU_SIGNAL.try_take() {
-            state.imu_sample = sample;
-            state.roll_deg = roll;
-            state.pitch_deg = pitch;
-            state.heading_deg = hdg;
-        }
-
-        // 1. Process Gesture Events
-        while let Ok(gesture) = GESTURE_CHANNEL.try_receive() {
-            match gesture {
-                GestureEvent::SingleTap => {
-                    state.last_gesture_name = "SingleTap";
-                    if state.action.state != ActionState::Idle {
-                        state.action.state = ActionState::Idle;
+        // Event-driven reactive concurrency: wake up immediately upon incoming channel data
+        // instead of periodic sleep-polling. Periodic ticker handles time/power/imu and watchdog ticks.
+        match select4(
+            GESTURE_CHANNEL.receive(),
+            HOST_PACKET_CHANNEL.receive(),
+            RADIO_REPORT_CHANNEL.receive(),
+            ticker.next(),
+        )
+        .await
+        {
+            Either4::First(gesture) => {
+                if let Some(out_evt) = coordinator.handle_gesture(gesture) {
+                    dispatch_device_event(out_evt);
+                }
+                while let Ok(g) = GESTURE_CHANNEL.try_receive() {
+                    if let Some(out_evt) = coordinator.handle_gesture(g) {
+                        dispatch_device_event(out_evt);
                     }
-                    DEVICE_EVENT_CHANNEL
-                        .send(DeviceEvent::SingleTap {
-                            context: "NOTIFY_CLEAR",
-                        })
-                        .await;
-                }
-                GestureEvent::DoubleTap => {
-                    state.last_gesture_name = "DoubleTap";
-                    if state.action.state == ActionState::WaitConfirm {
-                        state.action.state = ActionState::Success;
-                        DEVICE_EVENT_CHANNEL
-                            .send(DeviceEvent::DoubleTap {
-                                context: "WAIT_CONFIRM",
-                            })
-                            .await;
-                    }
-                }
-                GestureEvent::TiltLeft => {
-                    state.last_gesture_name = "TiltLeft";
-                    state.mode = ViewMode::Island;
-                }
-                GestureEvent::TiltRight => {
-                    state.last_gesture_name = "TiltRight";
-                    state.mode = ViewMode::Radar;
-                }
-                GestureEvent::FaceDownEnter => {
-                    state.last_gesture_name = "FaceDownEnter";
-                    state.is_facedown = true;
-                    DEVICE_EVENT_CHANNEL
-                        .send(DeviceEvent::FaceDown { entering: true })
-                        .await;
-                }
-                GestureEvent::FaceDownExit => {
-                    state.last_gesture_name = "FaceDownExit";
-                    state.is_facedown = false;
-                    DEVICE_EVENT_CHANNEL
-                        .send(DeviceEvent::FaceDown { entering: false })
-                        .await;
-                }
-                GestureEvent::HeadingUpdate(hdg) => {
-                    state.heading_deg = hdg as f32;
-                }
-                GestureEvent::KeyShortPress => {
-                    state.last_gesture_name = "KeyShort";
-                    // Cycle views: SelfTest -> Island -> Radar -> StandbyClock -> SelfTest
-                    state.mode = match state.mode {
-                        ViewMode::SelfTest => ViewMode::Island,
-                        ViewMode::Island => ViewMode::Radar,
-                        ViewMode::Radar => ViewMode::StandbyClock,
-                        ViewMode::StandbyClock => ViewMode::SelfTest,
-                    };
-                }
-                GestureEvent::KeyDoubleClick => {
-                    state.last_gesture_name = "KeyDouble";
-                }
-                GestureEvent::KeyLongPress => {
-                    state.last_gesture_name = "KeyLong";
-                    println!("IMU zero-bias recalibration triggered!");
                 }
             }
-        }
-
-        // 2. Process Host Packets
-        while let Ok(pkt) = HOST_PACKET_CHANNEL.try_receive() {
-            match pkt {
-                HostPacket::Telemetry(telem) => {
-                    state.telemetry = telem;
-                    state.host_connected = true;
-                }
-                HostPacket::Action(act) => {
-                    state.action = act;
-                }
-                HostPacket::Sync(sync) => {
-                    state.host_connected = true;
+            Either4::Second(pkt) => {
+                let outcome = coordinator.handle_host_packet(pkt);
+                if let Some(sync) = outcome.time_sync {
                     TIME_SYNC_SIGNAL.signal(sync);
                 }
-                HostPacket::DumpLogs => {}
+                if let Some(target) = outcome.target {
+                    enqueue_storage_command(StorageCommand::Save(
+                        coordinator.config_with_target(target),
+                    ));
+                }
+                if outcome.dump_logs {
+                    enqueue_storage_command(StorageCommand::Dump(coordinator.blackbox_snapshot()));
+                }
+                while let Ok(p) = HOST_PACKET_CHANNEL.try_receive() {
+                    let outcome = coordinator.handle_host_packet(p);
+                    if let Some(sync) = outcome.time_sync {
+                        TIME_SYNC_SIGNAL.signal(sync);
+                    }
+                    if let Some(target) = outcome.target {
+                        enqueue_storage_command(StorageCommand::Save(
+                            coordinator.config_with_target(target),
+                        ));
+                    }
+                    if outcome.dump_logs {
+                        enqueue_storage_command(StorageCommand::Dump(
+                            coordinator.blackbox_snapshot(),
+                        ));
+                    }
+                }
+            }
+            Either4::Third(report) => {
+                if let Some(event) = coordinator.presence_event(&report) {
+                    dispatch_device_event(event);
+                }
+                coordinator.handle_radio_report(report);
+                while let Ok(r) = RADIO_REPORT_CHANNEL.try_receive() {
+                    if let Some(event) = coordinator.presence_event(&r) {
+                        dispatch_device_event(event);
+                    }
+                    coordinator.handle_radio_report(r);
+                }
+            }
+            Either4::Fourth(_) => {
+                // Periodic maintenance tick: drain hardware signals
+                while let Ok(outcome) = STORAGE_OUTCOME_CHANNEL.try_receive() {
+                    match outcome {
+                        StorageOutcome::Saved(config) => {
+                            let target = if config.ble_target_hash == 0 {
+                                Some(BleTargetCommand::Clear)
+                            } else {
+                                TargetBinding::try_from(config.ble_target_hash)
+                                    .ok()
+                                    .map(BleTargetCommand::Bind)
+                            };
+                            if let Some(target) = target {
+                                RADIO_TARGET_SIGNAL.signal(target);
+                            }
+                        }
+                        StorageOutcome::SaveFailed(config) => {
+                            println!(
+                                "WARN: Keeping previous BLE target after persistence failure (seq={})",
+                                config.seq
+                            );
+                        }
+                        StorageOutcome::Dumped => {
+                            dispatch_device_event(DeviceEvent::DumpLogsRequest);
+                        }
+                    }
+                }
+
+                if let Some(command) = TARGET_APPLIED_SIGNAL.try_take() {
+                    coordinator.apply_target_binding(command);
+                }
+
+                if let Some(dt) = TIME_SIGNAL.try_take() {
+                    coordinator.handle_time(dt);
+                }
+
+                if let Some(status) = POWER_SIGNAL.try_take() {
+                    coordinator.handle_power(status);
+                }
+
+                if let Some(snapshot) = IMU_SIGNAL.try_take() {
+                    coordinator.handle_imu(snapshot);
+                }
+
+                let now = Instant::now();
+                if let Some(hb) = coordinator.tick(now) {
+                    dispatch_device_event(hb);
+                }
             }
         }
 
-        // 3. Process Radio Reports
-        while let Ok(report) = RADIO_REPORT_CHANNEL.try_receive() {
-            state.wifi_congestion = report.wifi_congestion;
-            state.wifi_blips = report.wifi_blips;
-            state.ble_near = report.ble_near;
-            state.ble_rssi = report.ble_rssi;
-            state.ble_blips = report.ble_blips;
+        // Publish snapshot to UI immediately if any event or tick modified state
+        if let Some(snapshot) = coordinator.take_ui_snapshot() {
+            UI_STATE_SIGNAL.signal(snapshot);
+        }
+    }
+}
+
+/// Task 8: BLE Presence & Radio Monitor
+#[embassy_executor::task]
+async fn radio_presence_task(target: Option<TargetBinding>) -> ! {
+    let mut tracker = BlePresenceTracker::new(target);
+    let mut ticker = Ticker::every(Duration::from_millis(1000));
+
+    loop {
+        let next = embassy_futures::select::select3(
+            RADIO_TARGET_SIGNAL.wait(),
+            BLE_ADVERTISEMENT_CHANNEL.receive(),
+            ticker.next(),
+        )
+        .await;
+
+        match next {
+            embassy_futures::select::Either3::First(command) => {
+                tracker.set_target(command.into());
+                TARGET_APPLIED_SIGNAL.signal(command);
+            }
+            embassy_futures::select::Either3::Second(advertisement) => {
+                tracker.process_advertisement(
+                    &advertisement.addr,
+                    advertisement.rssi,
+                    Instant::now(),
+                );
+                while let Ok(advertisement) = BLE_ADVERTISEMENT_CHANNEL.try_receive() {
+                    tracker.process_advertisement(
+                        &advertisement.addr,
+                        advertisement.rssi,
+                        Instant::now(),
+                    );
+                }
+            }
+            embassy_futures::select::Either3::Third(_) => {}
         }
 
-        // 4. Periodic Heartbeat with genuine power rail voltage
         let now = Instant::now();
-        if now.duration_since(last_heartbeat) >= Duration::from_secs(5) {
-            uptime_sec += 5;
-            last_heartbeat = now;
-            let _ = DEVICE_EVENT_CHANNEL
-                .send(DeviceEvent::Heartbeat {
-                    v_rail: state.v_rail_mv,
-                    uptime_sec,
-                })
-                .await;
-        }
+        let presence = tracker.update_watchdog(now);
+        let rssi = tracker.smoothed_target_rssi as i8;
 
-        // Publish snapshot to UI
-        UI_STATE_SIGNAL.signal(state.clone());
-
-        Timer::after(Duration::from_millis(50)).await;
+        let report = RadioReport {
+            target_bound: TargetBindingState::from(tracker.target_hash.is_some()),
+            target_seen: tracker.target_visibility,
+            presence,
+            ble_rssi: rssi,
+            ble_blips: tracker.blips.clone(),
+        };
+        let _ = RADIO_REPORT_CHANNEL.try_send(report);
     }
 }

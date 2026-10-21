@@ -1,6 +1,6 @@
 # 02. 物理姿态解算与手势识别引擎
 
-手势识别与物理姿态处理模块位于 [`src/gesture/`](file:///Volumes/HIKSEMI/code/island/src/gesture/)，包含姿态解算滤波器 [`filter.rs`](file:///Volumes/HIKSEMI/code/island/src/gesture/filter.rs) 与事件检测状态机 [`detector.rs`](file:///Volumes/HIKSEMI/code/island/src/gesture/detector.rs)。
+手势识别与物理姿态处理模块位于 [`src/gesture/`](../../src/gesture/)，包含姿态解算滤波器 [`filter.rs`](../../src/gesture/filter.rs) 与事件检测状态机 [`detector.rs`](../../src/gesture/detector.rs)。
 
 ---
 
@@ -12,20 +12,22 @@
 flowchart LR
     Sample["原始采样 (ax, ay, az, gx, gy, gz)"] --> Calib["减去零位漂移 (gx_bias, gy_bias, gz_bias)"]
     Calib --> LPF["一阶低通滤波 (alpha = 0.15)"]
-    LPF --> Angles["三角函数姿态解算 (atan2f)"]
+    LPF --> Angles["快速三角姿态解算 (fast_atan2_deg)"]
     Angles --> Heading["平放死区航向积分 (|Gz|>750mg & |Gz_dps|>2.0)"]
-    Heading --> Output["Attitude { roll, pitch, heading, gx_filt, gy_filt, gz_filt }"]
+    Heading --> Output["聚合姿态快照 (Attitude Snapshot)"]
 ```
 
 ### 1.1 一阶低通重力分离
 当设备处于运动或桌面敲击状态时，原始加速度包含高频动态惯性力。为了准确得到设备相对于重力场的倾角，采用一阶数字低通滤波器（LPF）：
 $$G_{k} = G_{k-1} + \alpha \cdot (A_k - G_{k-1})$$
-其中滤波系数 $\alpha = 0.15$。在 250Hz 采样率下，该滤波器的截止频率约为 $6.5\text{Hz}$，既能平滑滤除敲击产生的剧烈抖动，又能实时跟踪设备倾斜。
+其中滤波系数 $\alpha = 0.28$。在 200Hz 采样率下，该参数既能平滑滤除敲击产生的微高频杂波，又赋予了姿态解算灵敏敏捷的动态跟手性。
 
-### 1.2 俯仰角与横滚角解算
-通过分离出的重力分量计算横滚角（Roll）与俯仰角（Pitch）：
-$$\text{Roll} = \text{atan2}(G_x, G_z) \times \frac{180}{\pi}$$
-$$\text{Pitch} = \text{atan2}(G_y, G_z) \times \frac{180}{\pi}$$
+### 1.2 俯仰角与横滚角解算（Zero-FPU 快速有理逼近）
+ESP32-C6 (RV32IMAC) 无硬件浮点单元。为避免在 250Hz 高频采样循环中调用高开销的 `libm::atan2f` 软件仿真库，姿态解算器采用了 Hastings 极值有理逼近算法（`fast_atan2_deg`）：
+$$\theta(r) \approx \frac{57.29578 \cdot r}{1.0 + 0.28086 \cdot r^2} \quad (r \in [0, 1])$$
+通过八分圆折叠映射，在全域 $360^\circ$ 范围内典型角度逼近误差低于 $0.3^\circ$，单次姿态角求解仅需 1 次浮点乘法与 1 次除法，显著降低单核 CPU 中断周期占用：
+$$\text{Roll} = \text{fast\_atan2\_deg}(G_x, G_z)$$
+$$\text{Pitch} = \text{fast\_atan2\_deg}(G_y, G_z)$$
 
 ### 1.3 消除漂移的死区航向梯形积分
 传统仅依赖陀螺仪的航向角积分在静止时会因微小零漂不断自发旋转。`ImuFilter` 引入了**双重死区门限约束**：
@@ -44,55 +46,52 @@ $$\text{Pitch} = \text{atan2}(G_y, G_z) \times \frac{180}{\pi}$$
 为了精确识别“桌面对设备的硬质冲击波”，检测器计算**加速度变化率（急动度 Jerk）**：
 $$\text{Jerk} = |A_{z, k} - A_{z, k-1}| + \frac{|A_{x, k} - A_{x, k-1}| + |A_{y, k} - A_{y, k-1}|}{2}$$
 - 平滑拿起设备时：加速度绝对值很大，但 $\Delta A$ 很小，Jerk 极低。
-- 手指硬质敲击设备边缘时：产生陡峭的高频冲击应力波，$\text{Jerk} > 650$ 瞬时爆发。
+- 手指正常敲击设备边缘或桌面时：产生陡峭的高频冲击应力波，$\text{Jerk} > 320$ 灵敏捕捉。
 
 ### 2.2 单击 / 双击识别状态机
 ```mermaid
 stateDiagram-v2
     [*] --> Idle
-    Idle --> FirstTapDetected: Jerk > 650 (第1次脉冲)
-    FirstTapDetected --> DoubleTap: 70ms <= dt <= 280ms 再次触发 Jerk > 650
-    FirstTapDetected --> SingleTap: dt > 280ms 无二次敲击
-    DoubleTap --> Cooldown: 发送 GestureEvent::DoubleTap
-    SingleTap --> Cooldown: 发送 GestureEvent::SingleTap
-    Cooldown --> Idle: 保持 300ms 忽略机械回弹余震
+    Idle --> FirstTapDetected: Jerk > 320 (第1次脉冲)
+    FirstTapDetected --> DoubleTap: 60ms <= dt <= 420ms 再次触发 Jerk > 320
+    FirstTapDetected --> SingleTap: dt > 420ms 无二次敲击
+    DoubleTap --> Cooldown: 输出双击事件 (DoubleTap)
+    SingleTap --> Cooldown: 输出单击事件 (SingleTap)
+    Cooldown --> Idle: 保持 180ms 忽略机械回弹余震
 ```
-- **消抖死区（$< 70\text{ms}$）**：首次敲击引发的壳体机械振铃谐振通常在 50ms 内衰减，在此时间窗内忽略，防止单次敲击被误判为双击。
-- **有效双击窗（$70\text{ms} \le \Delta t \le 280\text{ms}$）**：符合人类敲击交互节奏的时间窗口。
-- **超时触发单击（$> 280\text{ms}$）**：窗口结束后若无后续敲击，确认为单次轻敲。
-- **冷却窗口（$300\text{ms}$）**：输出事件后进入冷却期，屏蔽后续余震。
+
+- **消抖死区（$< 60\text{ms}$）**：首次敲击引发的壳体机械振铃谐振通常在此时间窗内衰减，在此时间窗内忽略，防止单次敲击被误判为双击。
+- **自然双击窗（$60\text{ms} \le \Delta t \le 420\text{ms}$）**：大幅放宽符合人类手指自然敲击节奏的时间窗口。
+- **超时触发单击（$> 420\text{ms}$）**：窗口结束后确认为单次轻敲。
+- **冷却窗口（$180\text{ms}$）**：输出事件后进入极短冷却期，兼顾高频连击响应与防余震抖动。
 
 ---
 
 ## 3. 倾斜与反扣状态机（Tilt & FaceDown）
 
 ### 3.1 左右倾斜滞后锁定（Tilt Hysteresis）
-当用户左右偏转设备（如左右摇摆切换灵动岛与态势雷达视图）时，采用带滞后回差的双门限比较器：
-- **倾斜触发门限**：横滚角 $|\text{Roll}| > 28^\circ$，且持续保持超过 $120\text{ms}$：
-  - $\text{Roll} < -28^\circ \rightarrow$ 触发 `GestureEvent::TiltLeft` 并进入 `LockedLeft`。
-  - $\text{Roll} > +28^\circ \rightarrow$ 触发 `GestureEvent::TiltRight` 并进入 `LockedRight`。
-- **恢复居中门限**：必须回正至 $|\text{Roll}| < 12^\circ$ 才能解除锁定状态，彻底防止临界角度处的频繁抖动震荡。
+当用户左右偏转设备（如左右摇摆切换灵动岛与桌宠视图）时，采用带滞后回差的双门限比较器：
+- **人体工学轻触门限**：横滚角 $|\text{Roll}| > 18^\circ$（俯仰角放宽至 $< 50^\circ$），且仅需保持 $\ge 60\text{ms}$：
+  - $\text{Roll} < -18^\circ \rightarrow$ 触发左倾斜并进入 `LockedLeft`。
+  - $\text{Roll} > +18^\circ \rightarrow$ 触发右倾斜并进入 `LockedRight`。
+- **恢复居中门限**：回正至 $|\text{Roll}| < 8^\circ$ 解除锁定，保持防抖回差的同时消除手势顿挫。
 
 ### 3.2 屏幕朝下扣放（FaceDown DND）
-- **进入免打扰**：当过滤后的重力分量 $G_z < -750\text{mg}$（屏幕朝下反扣在桌面），并持续稳定保持 $\ge 500\text{ms}$ 时，触发 `GestureEvent::FaceDownEnter`。UI 立即关闭屏幕背光（0% 亮度），电脑守护端激活系统勿扰模式。
-- **退出免打扰**：当设备被翻转拾起至 $G_z > 500\text{mg}$，并持续 $\ge 300\text{ms}$ 时，触发 `GestureEvent::FaceDownExit`，屏幕与主机恢复正常提醒。
+- **进入免打扰**：当过滤后的重力分量 $G_z < -650\text{mg}$（屏幕朝下反扣在桌面），并稳定保持 $\ge 200\text{ms}$ 时，触发进入反扣状态。UI 立即关闭屏幕背光（0% 亮度），电脑守护端激活系统勿扰模式。
+- **退出免打扰**：当设备被翻转拾起至 $G_z > 400\text{mg}$，并稳定 $\ge 100\text{ms}$ 时，触发退出反扣状态，屏幕与主机恢复正常提醒。
 
 ---
 
-## 4. 按键防重入与消抖状态机（`ButtonDetector`）
+## 4. 硬件引脚隔离与纯手势交互原则（GPIO9 Strapping Pin）
 
-板载侧边 BOOT 按键（GPIO9）支持短按单击、双击与长按操作，采用抗重入设计：
+板载侧边按键为 ESP32-C6 的 **BOOT / Strapping 引脚（GPIO9）**：
 
-```mermaid
-stateDiagram-v2
-    [*] --> Released
-    Released --> Pressed: GPIO9 低电平
-    Pressed --> WaitingSecondClick: 20ms <= 保持 < 1500ms 且释放
-    Pressed --> LongPressEmitted: 保持时间 >= 1500ms (触发 KeyLongPress)
-    LongPressEmitted --> Released: 物理完全松开
-    WaitingSecondClick --> DoubleClickEmitted: 250ms 内再次按下 (触发 KeyDoubleClick)
-    WaitingSecondClick --> SingleClickEmitted: 250ms 超时释放 (触发 KeyShortPress)
-```
-
-- **长按单次闭锁（`LongPressEmitted`）**：
-  长按达到 1500ms 时立即触发 `GestureEvent::KeyLongPress`，随后状态机切换至 `LongPressEmitted` 闭锁状态。用户继续按住不放时不会重复触发长按，松开时也不会误触发短按，从根本上杜绝了按键长按状态机的经典重发缺陷。
+- **硬件职责隔离**：
+  根据硬件规格书说明，GPIO9 在芯片复位期间决定芯片是否进入 ROM 串口下载模式。若在运行期间将其作为交互功能键使用，不仅存在电气竞争风险，且桌面圆形硬件形态下按键不易触达。
+- **免按键纯手势驱动交互（Touchless Physical Gestures）**：
+  固件将 GPIO9 完全从业务交互与手势事件通道（`GESTURE_CHANNEL`）中解耦，禁止将 BOOT 键作为功能键使用：
+  - **视图导航**：完全由机身左右倾斜手势（`TiltLeft` / `TiltRight`）驱动，在自检页、桌面灵动岛与桌面电子宠物之间丝滑巡航；
+  - **任务审批与交互**：完全由机身双击轻敲（`DoubleTap`）驱动；
+  - **免打扰控制**：完全由屏幕反扣（`FaceDown` / `FaceUp`）驱动。
+- **硬件诊断透传**：
+  `PowerKeyMonitor` 仅在低频采样中被动读取 GPIO9 电气电平，仅供工程自检页面（`SelfTestView`）显示引脚通断诊断状态（`BOOT:PRSD / REL`），不参与任何业务逻辑判定。

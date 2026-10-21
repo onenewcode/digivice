@@ -30,55 +30,130 @@ pub struct ImuSample {
     pub temp_c: i16,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Strongly-typed IMU sample combined with attitude orientation.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ImuAttitudeSnapshot {
+    pub sample: ImuSample,
+    pub roll_deg: f32,
+    pub pitch_deg: f32,
+    pub heading_deg: f32,
+    pub imu_status: ImuStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImuError {
     DeviceNotFound,
     BusError,
     ConfigurationFailed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImuStatus {
+    #[default]
+    HardwarePresent,
+    Unavailable(ImuError),
+}
+
+impl core::fmt::Display for ImuError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::DeviceNotFound => write!(f, "QMI8658 device not found or WHO_AM_I mismatch"),
+            Self::BusError => write!(f, "I2C bus communication error with QMI8658"),
+            Self::ConfigurationFailed => write!(f, "Failed to configure QMI8658 control registers"),
+        }
+    }
+}
+
+impl core::error::Error for ImuError {}
+
 pub struct Qmi8658<I2C> {
     i2c: I2C,
     who_am_i: u8,
+    status: ImuStatus,
 }
 
 impl<I2C: I2c> Qmi8658<I2C> {
-    pub fn new(mut i2c: I2C) -> Result<Self, ImuError> {
+    pub fn new(mut i2c: I2C) -> Self {
         let mut id_buf = [0u8; 1];
         if i2c
             .write_read(QMI8658_ADDR, &[REG_WHO_AM_I], &mut id_buf)
             .is_err()
         {
-            return Err(ImuError::BusError);
+            return Self {
+                i2c,
+                who_am_i: 0,
+                status: ImuStatus::Unavailable(ImuError::BusError),
+            };
         }
 
         if id_buf[0] != WHO_AM_I_VALUE {
-            return Err(ImuError::DeviceNotFound);
+            return Self {
+                i2c,
+                who_am_i: id_buf[0],
+                status: ImuStatus::Unavailable(ImuError::DeviceNotFound),
+            };
         }
 
         let who_am_i = id_buf[0];
 
         // 1. CTRL1: 0x60 (auto-increment register address, 50MHz serial, internal 2MHz clock)
-        i2c.write(QMI8658_ADDR, &[REG_CTRL1, 0x60])
-            .map_err(|_| ImuError::ConfigurationFailed)?;
+        if i2c.write(QMI8658_ADDR, &[REG_CTRL1, 0x60]).is_err() {
+            return Self {
+                i2c,
+                who_am_i,
+                status: ImuStatus::Unavailable(ImuError::ConfigurationFailed),
+            };
+        }
 
         // 2. CTRL2: Accel: ±4g (0x10), ODR 250Hz (0x07) -> 0x17
-        i2c.write(QMI8658_ADDR, &[REG_CTRL2, 0x17])
-            .map_err(|_| ImuError::ConfigurationFailed)?;
+        if i2c.write(QMI8658_ADDR, &[REG_CTRL2, 0x17]).is_err() {
+            return Self {
+                i2c,
+                who_am_i,
+                status: ImuStatus::Unavailable(ImuError::ConfigurationFailed),
+            };
+        }
 
         // 3. CTRL3: Gyro: ±512 dps (0x50), ODR 250Hz (0x07) -> 0x57
-        i2c.write(QMI8658_ADDR, &[REG_CTRL3, 0x57])
-            .map_err(|_| ImuError::ConfigurationFailed)?;
+        if i2c.write(QMI8658_ADDR, &[REG_CTRL3, 0x57]).is_err() {
+            return Self {
+                i2c,
+                who_am_i,
+                status: ImuStatus::Unavailable(ImuError::ConfigurationFailed),
+            };
+        }
 
         // 4. CTRL5: Enable low-pass filter (LPF Mode 0, ~10% ODR cutoff)
-        i2c.write(QMI8658_ADDR, &[REG_CTRL5, 0x55])
-            .map_err(|_| ImuError::ConfigurationFailed)?;
+        if i2c.write(QMI8658_ADDR, &[REG_CTRL5, 0x55]).is_err() {
+            return Self {
+                i2c,
+                who_am_i,
+                status: ImuStatus::Unavailable(ImuError::ConfigurationFailed),
+            };
+        }
 
         // 5. CTRL7: Enable accelerometer and gyroscope
-        i2c.write(QMI8658_ADDR, &[REG_CTRL7, 0x03])
-            .map_err(|_| ImuError::ConfigurationFailed)?;
+        if i2c.write(QMI8658_ADDR, &[REG_CTRL7, 0x03]).is_err() {
+            return Self {
+                i2c,
+                who_am_i,
+                status: ImuStatus::Unavailable(ImuError::ConfigurationFailed),
+            };
+        }
 
-        Ok(Self { i2c, who_am_i })
+        Self {
+            i2c,
+            who_am_i,
+            status: ImuStatus::HardwarePresent,
+        }
+    }
+
+    pub fn status(&self) -> ImuStatus {
+        self.status
+    }
+
+    pub fn is_available(&self) -> bool {
+        self.status == ImuStatus::HardwarePresent
     }
 
     pub fn who_am_i(&self) -> u8 {
@@ -87,6 +162,10 @@ impl<I2C: I2c> Qmi8658<I2C> {
 
     /// Read raw 6-DOF + Temperature in a single contiguous I2C burst read
     pub fn read_sample(&mut self) -> Result<ImuSample, ImuError> {
+        if let ImuStatus::Unavailable(err) = self.status {
+            return Err(err);
+        }
+
         // Read 12 bytes of Accel + Gyro starting at 0x35 (AX_L)
         let mut buf = [0u8; 12];
         self.i2c
@@ -102,18 +181,23 @@ impl<I2C: I2c> Qmi8658<I2C> {
         let raw_gz = i16::from_le_bytes([buf[10], buf[11]]);
 
         // Accel ±4g scale: 1g = 8192 LSB -> mg = raw * 1000 / 8192 = raw * 125 / 1024
+        // Note: QMI8658 is mounted on the bottom side of the PCB (opposite the GC9A01 LCD).
+        // To match the display-centric body coordinate frame (screen facing up = +Z),
+        // the Z-axis acceleration and Z gyro rate must be inverted.
         let ax_mg = ((raw_ax as i32) * 125) / 1024;
         let ay_mg = ((raw_ay as i32) * 125) / 1024;
-        let az_mg = ((raw_az as i32) * 125) / 1024;
+        let az_mg = -(((raw_az as i32) * 125) / 1024);
 
         // Gyro ±512 dps scale: 1 dps = 64 LSB -> mdps = raw * 1000 / 64 = raw * 125 / 8
         let gx_mdps = ((raw_gx as i32) * 125) / 8;
         let gy_mdps = ((raw_gy as i32) * 125) / 8;
-        let gz_mdps = ((raw_gz as i32) * 125) / 8;
+        let gz_mdps = -(((raw_gz as i32) * 125) / 8);
 
         // Read temperature (0x33, 0x34)
         let mut t_buf = [0u8; 2];
-        let _ = self.i2c.write_read(QMI8658_ADDR, &[REG_TEMP_L], &mut t_buf);
+        self.i2c
+            .write_read(QMI8658_ADDR, &[REG_TEMP_L], &mut t_buf)
+            .map_err(|_| ImuError::BusError)?;
         let raw_temp = i16::from_le_bytes([t_buf[0], t_buf[1]]);
         // Temperature formula from datasheet: temp_c = raw_temp / 256.0 + 25.0
         let temp_c = (raw_temp / 256) + 25;

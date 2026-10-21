@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+PATH="$HOME/.cargo/bin:$PATH"
+
+if ! cargo fmt --all -- --check; then
+    cargo fmt --all
+    echo "Pre-commit: Code reformatted. Please stage changes and commit again." >&2
+    exit 1
+fi
+
+cargo clippy --all-features --workspace -- -D warnings

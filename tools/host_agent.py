@@ -133,7 +133,9 @@ def main():
                         choices=["IDLE", "THINKING", "WAIT_CONFIRM", "SUCCESS", "ERROR"],
                         help="Action notification state")
     parser.add_argument("--progress", type=int, default=100, help="Progress percentage (0-100)")
+    parser.add_argument("--ble-hash", type=lambda x: int(x, 0), help="Bind target BLE hash (1-65535); 0 clears binding")
     parser.add_argument("--dump-logs", action="store_true", help="Request Flash blackbox dump")
+    parser.add_argument("--duration", type=float, default=None, help="Run daemon for N seconds, then exit")
 
     args = parser.parse_args()
 
@@ -163,15 +165,36 @@ def main():
         cmd = f"{PROTO_PREFIX}ACT,state={args.state},source={args.source},title={args.notify},progress={args.progress}\n"
         ser.write(cmd.encode("utf-8"))
         print(f"Sent: {cmd.strip()}")
-        ser.close()
-        sys.exit(0)
+        if args.duration is None:
+            ser.close()
+            sys.exit(0)
 
     if args.dump_logs:
         cmd = f"{PROTO_PREFIX}DUMP_LOGS\n"
         ser.write(cmd.encode("utf-8"))
         print("Requested Blackbox Flash dump from device...")
-        ser.close()
-        sys.exit(0)
+        deadline = time.time() + 1.0
+        while time.time() < deadline:
+            if ser.in_waiting:
+                resp = ser.readline().decode("utf-8", errors="replace").strip()
+                if resp:
+                    print(f"Device: {resp}")
+                    if "LOGS_DUMP" in resp:
+                        break
+            time.sleep(0.05)
+        if args.duration is None:
+            ser.close()
+            sys.exit(0)
+
+    if args.ble_hash is not None:
+        if not 0 <= args.ble_hash <= 65535:
+            parser.error("--ble-hash must be between 0 and 65535")
+        cmd = f"{PROTO_PREFIX}BLE_BIND,hash={args.ble_hash}\n"
+        ser.write(cmd.encode("utf-8"))
+        print(f"Sent: {cmd.strip()}")
+        if args.duration is None:
+            ser.close()
+            sys.exit(0)
 
     # 2. Continuous Daemon Mode: Sync Clock + Stream Telemetry
     print("Daemon running. Streaming telemetry (Ctrl+C to quit)...")
@@ -189,6 +212,7 @@ def main():
     prev_net = psutil.net_io_counters()
     prev_time = time.time()
     last_sync_time = time.time()
+    started_at = time.time()
 
     try:
         while True:
@@ -198,6 +222,8 @@ def main():
                 if line:
                     if line.startswith(f"{PROTO_PREFIX}EVT,"):
                         handle_device_event(line[len(f"{PROTO_PREFIX}EVT,"):])
+                    elif line.startswith("EVT,"):
+                        handle_device_event(line[len("EVT,"):])
                     elif line.startswith(PROTO_PREFIX):
                         print(f"[DEVICE PROTO] {line}")
                     else:
@@ -227,6 +253,10 @@ def main():
                 epoch = int(time.time())
                 sync_frame = f"{PROTO_PREFIX}SYNC,epoch={epoch},tz={tz_offset},media=Active\n"
                 ser.write(sync_frame.encode("utf-8"))
+
+            if args.duration is not None and curr_time - started_at >= args.duration:
+                print(f"Duration limit of {args.duration:.1f}s reached, exiting host agent.")
+                break
 
             time.sleep(0.05)
 

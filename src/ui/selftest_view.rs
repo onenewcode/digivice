@@ -3,7 +3,7 @@
 use super::{
     CENTER_X, CENTER_Y, COLOR_AMBER, COLOR_CYAN, COLOR_GREEN, COLOR_WHITE, RADIUS, UiState,
 };
-use crate::board::RtcStatus;
+use crate::board::{ImuStatus, RtcStatus};
 use core::fmt::Write;
 use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::mono_font::ascii::FONT_6X10;
@@ -12,7 +12,6 @@ use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{Circle, PrimitiveStyle};
 use embedded_graphics::text::Text;
 use heapless::String;
-use libm::{cosf, sinf};
 
 pub fn render_selftest<D: DrawTarget<Color = Rgb565>>(target: &mut D, state: &UiState) {
     // 1. Outer green circle (R=118, Center 120,120)
@@ -24,19 +23,20 @@ pub fn render_selftest<D: DrawTarget<Color = Rgb565>>(target: &mut D, state: &Ui
     .draw(target)
     .ok();
 
-    // 2. IMU Gravity Indicator Ball on circumference
-    // Compute angle from roll and pitch
-    let ax = state.imu_sample.ax_mg as f32;
-    let ay = state.imu_sample.ay_mg as f32;
-    let norm = libm::sqrtf(ax * ax + ay * ay);
-    let ball_angle = if norm > 50.0 {
-        libm::atan2f(ay, ax)
+    // 2. IMU Gravity Indicator Ball on circumference (direct proportional projection, Zero-Trig & Zero-FPU)
+    let ax = state.imu_sample.ax_mg;
+    let ay = state.imu_sample.ay_mg;
+    let norm_sq = (ax as i64 * ax as i64 + ay as i64 * ay as i64) as u64;
+    let (ball_x, ball_y) = if norm_sq > 2500 {
+        let norm = norm_sq.isqrt() as i32;
+        let ball_r = RADIUS - 5;
+        (
+            CENTER_X + (ax * ball_r) / norm,
+            CENTER_Y + (ay * ball_r) / norm,
+        )
     } else {
-        0.0
+        (CENTER_X, CENTER_Y)
     };
-    let ball_r = (RADIUS - 5) as f32;
-    let ball_x = CENTER_X + (cosf(ball_angle) * ball_r) as i32;
-    let ball_y = CENTER_Y + (sinf(ball_angle) * ball_r) as i32;
     Circle::new(Point::new(ball_x - 4, ball_y - 4), 8)
         .into_styled(PrimitiveStyle::with_fill(COLOR_CYAN))
         .draw(target)
@@ -60,10 +60,21 @@ pub fn render_selftest<D: DrawTarget<Color = Rgb565>>(target: &mut D, state: &Ui
         .draw(target)
         .ok();
 
-    // Line 2: IMU WHO_AM_I
-    Text::new("IMU 0x6B: OK (WHO=0x05)", Point::new(32, 80), green_style)
-        .draw(target)
-        .ok();
+    // Line 2: IMU WHO_AM_I / Status
+    match state.imu_status {
+        ImuStatus::HardwarePresent => {
+            Text::new("IMU 0x6B: OK (WHO=0x05)", Point::new(32, 80), green_style)
+                .draw(target)
+                .ok();
+        }
+        ImuStatus::Unavailable(err) => {
+            let mut s2 = String::<36>::new();
+            let _ = write!(s2, "IMU 0x6B: ERR ({})", err);
+            Text::new(&s2, Point::new(32, 80), amber_style)
+                .draw(target)
+                .ok();
+        }
+    }
 
     // Line 3: ACC (mg)
     let mut s3 = String::<36>::new();
@@ -100,7 +111,9 @@ pub fn render_selftest<D: DrawTarget<Color = Rgb565>>(target: &mut D, state: &Ui
         let _ = write!(
             s5,
             "RTC 0x51: {:02}:{:02}:{:02}",
-            state.datetime.hour, state.datetime.minute, state.datetime.second
+            state.datetime.hour(),
+            state.datetime.minute(),
+            state.datetime.second()
         );
         Text::new(&s5, Point::new(26, 150), green_style)
             .draw(target)
@@ -114,20 +127,21 @@ pub fn render_selftest<D: DrawTarget<Color = Rgb565>>(target: &mut D, state: &Ui
 
     // Line 6: PWR Rail & Charging State
     let mut s6 = String::<36>::new();
-    let bc = if state.bc_state_high { "HI" } else { "CHG" };
+    let bc = state.charge_state.as_str();
     let _ = write!(s6, "PWR Rail: {} mV | BC:{}", state.v_rail_mv, bc);
     Text::new(&s6, Point::new(26, 168), text_style)
         .draw(target)
         .ok();
 
-    // Line 7: KEY & Last Gesture
+    // Line 7: BOOT Strapping Pin & Last Gesture
     let mut s7 = String::<36>::new();
-    let key = if state.is_boot_pressed {
+    let boot = if state.is_boot_pressed() {
         "PRSD"
     } else {
         "REL "
     };
-    let _ = write!(s7, "KEY:{} EVT:{}", key, state.last_gesture_name);
+    let evt = state.last_gesture.map(|g| g.name()).unwrap_or("Ready");
+    let _ = write!(s7, "BOOT:{} EVT:{}", boot, evt);
     Text::new(&s7, Point::new(26, 186), cyan_style)
         .draw(target)
         .ok();
