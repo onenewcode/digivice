@@ -8,8 +8,11 @@
 
 pub mod app;
 pub mod board;
+pub mod domain;
 pub mod gesture;
-pub mod proto;
+pub mod ipc;
+pub mod pet;
 pub mod radio;
 pub mod storage;
+pub mod tasks;
 pub mod ui;

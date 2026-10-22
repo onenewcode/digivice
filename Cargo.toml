@@ -56,11 +56,14 @@ esp-radio = { version = "1.0.0-beta.1", features = [
   "esp32c6",
   "unstable",
 ] }
-trouble-host = { version = "=0.7.0", default-features = false, features = [
+trouble-host = { version = "0.8.0", default-features = false, features = [
+  "peripheral",
+  "gatt",
+  "derive",
   "scan",
   "default-packet-pool",
+  "security",
 ] }
-bt-hci = "=0.9.0"
 
 [profile.dev]
 # When build speed is not a concern, keep dev firmware highly optimized for smooth MCU execution

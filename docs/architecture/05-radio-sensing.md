@@ -1,52 +1,120 @@
-# 05. BLE 5 近场感知与离席自动安全锁屏
+# 05. BLE 在席、配置、HID 与音乐联动
 
-近场感知子系统位于 [`src/radio/`](../../src/radio/)，专精于利用 ESP32-C6 内置的 **Bluetooth 5.0 (BLE)** 硬件射频能力，实现“用户佩戴智能手表/手机走近桌面时自动亮屏、离开工位时自动锁屏”的桌面安全防护闭环。
+ESP32-C6 的 BLE 射频从“通知电脑锁屏”的从属链路，升级为设备自主运行的可选连接层。扫描、在席、GATT、HID 和音乐输入必须共享 BLE 资源，但不能阻塞宠物状态机或渲染任务。
 
 ---
 
-## 1. BLE 5 目标设备追踪与近场在席检测（`src/radio/ble_presence.rs`）
+## 1. 在席感知
 
-为了实现无感、精准的工位在席识别，[`BlePresenceTracker`](../../src/radio/ble_presence.rs) 实现了抗抖动高可靠的在席检测状态机。
+### 1.1 目标绑定与 RSSI 滤波
 
-### 1.1 16位紧凑 MAC 散列
-为了在 `#![no_std]` 且固定长度的数据结构中以极小开销追踪设备，将 6 字节蓝牙物理 MAC 地址通过异或折叠散列为 16 位整型：
-$$\text{Hash} = (\text{MAC}_0 \oplus \text{MAC}_2 \oplus \text{MAC}_4) \mid \Big((\text{MAC}_1 \oplus \text{MAC}_3 \oplus \text{MAC}_5) \ll 8\Big)$$
+现有 `BlePresenceTracker` 的 16 位地址折叠哈希、EMA 和滞回策略继续保留，目标绑定通过 GATT 完成：
 
-### 1.2 EMA 指数滑动平均滤波
-无线信号在室内多径传播环境下瞬时抖动剧烈（可能在 1 秒内发生 $\pm 15\text{dB}$ 的剧烈浮动）。直接判定会导致离席检测频繁闪烁。
+- `Near`：EMA RSSI >= -68 dBm；
+- `Away`：EMA RSSI < -78 dBm；
+- 中间 10 dB 保持原状态；
+- 目标 15 秒未见时进入 `Away`；
+- 未绑定目标时不产生虚假的在席事件。
 
-系统采用 **一阶指数滑动平均滤波器（EMA）**：
-$$\overline{\text{RSSI}}_k = \alpha \cdot \text{RSSI}_k + (1 - \alpha) \cdot \overline{\text{RSSI}}_{k-1}$$
-其中 $\alpha = 0.25$。该滤波参数赋予最新信号 $25\%$ 的响应权重，同时保留 $75\%$ 的历史基线，能够平滑过滤人走动引起的偶发信号下陷，同时在用户真正走近或离开时保持在 1.5 秒内敏捷跟进。
+在席结果只驱动设备本地行为：
 
-### 1.3 具有 10dB 回差的滞后比较器（Hysteresis Thresholds）
-为了杜绝边界信号下的反复“在席/离席”震荡，状态机设置了两个非对称阈值门限：
-- **靠近判准门限（Near Threshold）**：$\overline{\text{RSSI}} \ge -68\text{dBm}$ 时，判定进入 `NEAR` 在席状态；
-- **离开判准门限（Away Threshold）**：$\overline{\text{RSSI}} < -78\text{dBm}$ 时，才判定进入 `AWAY` 离席状态；
-- **$10\text{dB}$ 保护死区（Deadband）**：当信号在 $-68\text{dBm} \sim -78\text{dBm}$ 之间徘徊时，严格保持原有状态不变。
+- `Near`：恢复亮度、欢迎动作、允许音乐/HID 增强；
+- `Away`：降低背光、进入安静策略、停止非必要动画；
+- 不再发送“锁屏电脑”事件，也不依赖任何宿主程序。
+
+### 1.2 事件边沿
+
+`PresenceState` 只在边沿变化时发布 `PresenceTransition`：
 
 ```text
- 信号强度 (dBm)
-    ▲
-    │   -50 dBm ─── [在席 NEAR]
-    │   -68 dBm ─── 靠近门限 (必须高于此线才触发 NEAR)
-    │           ░░░ 10dB 迟滞缓冲区 (保持原状态不翻转) ░░░
-    │   -78 dBm ─── 离开门限 (必须低于此线才触发 AWAY)
-    │   -90 dBm ─── [离席 AWAY -> 触发电脑锁屏]
-    ▼
+PresenceTransition::Arrived
+PresenceTransition::Departed
+PresenceTransition::Unknown
 ```
 
-### 1.4 15 秒断联失联看门狗
-若用户直接带上手机走出办公室门，广播信号骤停（不再产生新的广播包）。此时系统检查距上次捕获该目标信标的时间：
-$$\Delta t = \text{now} - \text{last\_seen\_target}$$
-绑定目标一旦在 15 秒内从未被观测到，状态机自动判定为 `AWAY`，避免把“目标消失”误判为在席。
+`Unknown` 用于扫描暂时不可用或目标配置被清除，不能直接等同 `Away`。
 
-### 1.5 广播采集与事件闭环
-[`src/bin/main.rs`](../../src/bin/main.rs) 中的 `ble_runner_task` 驱动 Trouble Host 的 HCI 接收循环；`ble_scan_task` 负责启动并周期性续期 100ms 被动扫描会话。扫描处理程序将广播地址与 RSSI 投递到固定容量通道，由 `radio_presence_task` 消费并送入状态机处理。
+---
 
-`radio_presence_task` 在在席状态发生跳变时生成设备事件，经由异步通道交给 USB 发送任务；因此电脑端 `host_agent.py` 的离席锁屏路径与底层扫描数据完整闭环。未绑定目标时不会产生冗余在席事件。
+## 2. BLE GATT 配置服务
 
-为确保 RSSI 更新频率不受控制器去重策略影响，扫描会话关闭重复广播过滤；同一地址的新广播会持续刷新 15 秒看门狗。初始绑定目标尚未被观测到时保持 `AWAY`，避免把“尚未发现”误报为在席。
+设备作为 BLE 外设提供标准 GATT 服务，手机或电脑仅在需要时连接。
 
-### 1.6 严格分层与实体所有权（Layering Integrity）
-在模块分层设计中，信号信标结构体定义严格归属于 [`src/radio/mod.rs`](../../src/radio/mod.rs)，[`BlePresenceTracker`](../../src/radio/ble_presence.rs) 内部消费。UI 模块仅作为下游表现层只读展示雷达点阵，杜绝了底层射频感知反向依赖上层界面的分层倒置缺陷。
+### 2.1 配置内容
+
+- 宠物偏好：亮度、动画速度、互动灵敏度；
+- FocusSession：专注、短休息、长休息时长；
+- HID：启用状态、手势到动作映射、配对清除；
+- MusicScene：启用状态、动作风格、超时策略；
+- 在席：目标绑定、门限和离席时长；
+- 只读信息：固件版本、电池、电源、统计和黑匣子摘要。
+
+### 2.2 一致性与安全
+
+- GATT 写入先验证范围和版本，再发送到 `STORAGE_COMMAND_CHANNEL`；
+- `storage_task` 用 Sector A/B 双缓冲提交，成功后才更新 RAM 配置；
+- 连接中断不会回滚已经确认的配置；
+- 写入错误只返回错误状态，不重启、不阻塞 UI；
+- 统计和黑匣子按需读取，不持续广播敏感数据。
+
+---
+
+## 3. BLE HID
+
+首版实现标准 HID over GATT Profile，报告范围限定为 Consumer Control：
+
+- 播放/暂停；
+- 上一首/下一首；
+- 音量增加/减少；
+- 静音；
+- 专注开始/暂停/完成映射到可配置的媒体动作。
+
+实现约束：
+
+- `HidConnectionState` 使用 `Unpaired/Paired/Connected` 强类型状态；
+- `HidAction` 经过固定容量队列发送，断开时丢弃过期瞬时事件；
+- 不发送键盘文本、不移动鼠标、不执行系统锁屏；
+- 报告失败仅记录诊断结果；
+- BLE HID 连接不是宠物运行的前置条件。
+
+BLE HID 与音乐 GATT 可以同时存在，但任何一个连接断开都必须让本地 `PetBehavior` 继续运行。
+
+---
+
+## 4. 音乐联动
+
+### 4.1 BLE MIDI
+
+设备可接收 BLE MIDI Clock、Start/Stop/Continue 和 Note On/Off。MIDI 事件只提供拍速和拍点，不承载音频。
+
+系统级音乐（例如流媒体播放器）未必会输出 MIDI Clock；需要手机/电脑上的临时应用、插件或音乐软件把音频转换为 MIDI/特征。该工具可以按需启动，不能成为设备运行依赖。
+
+### 4.2 MusicScene GATT 特征
+
+对于不支持 BLE MIDI 的音乐分析器，提供写入特征：
+
+```text
+MusicScene {
+    bpm: u16,              // 40..240；0 表示未知
+    beat_phase: u8,        // 0..255
+    energy: u8,            // 0..100
+    mood: MusicMood,       // Calm/Happy/Focused/Excited/Sad/Unknown
+    section: MusicSection, // Intro/Verse/Chorus/Bridge/Outro/Unknown
+    sequence: u16,
+}
+```
+
+- `sequence` 防止乱序帧覆盖最新状态；
+- 数据间隔超过 3 秒转为 `Inactive`；
+- `MusicScene` 只影响动作强度、表情和短剧情，不覆盖 FaceDown、睡眠或用户手势；
+- 原始音频、歌曲标题和外部账户信息不存入设备。
+
+---
+
+## 5. BLE 并发与功耗
+
+- BLE HCI runner 独占控制器，扫描、GATT、HID 和 MIDI 业务通过固定容量事件通道解耦；
+- 在席扫描采用低占空比策略，HID/GATT 连接建立后暂停不必要的广播扫描；
+- Away、FaceDown 和低电量时降低扫描、广告和动画频率；
+- BLE 连接异常不得让单核任务忙轮询，所有等待分支必须可取消并让度；
+- BLE 配对和配置变化通过黑匣子记录原因，便于离线排查。

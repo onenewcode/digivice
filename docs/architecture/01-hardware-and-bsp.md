@@ -8,13 +8,13 @@
 
 | 外设模块 | 硬件芯片 / 接口 | 管脚分配 | 通信协议 / 驱动模式 | 架构设计考量 |
 | :--- | :--- | :--- | :--- | :--- |
-| **圆形液晶屏** | GC9A01 1.28" (240x240) | SCK: `GPIO11`<br>MOSI: `GPIO21`<br>CS: `GPIO10`<br>DC: `GPIO19`<br>RST: `GPIO20` | SPI2 (40MHz Blocking) | 独占硬件 SPI，CS 独立拉低，关闭 TF 卡 CS (`GPIO15`) 杜绝总线竞争 |
+| **圆形液晶屏** | GC9A01 1.28" (240x240) | SCK: `GPIO11`<br>MOSI: `GPIO21`<br>CS: `GPIO10`<br>DC: `GPIO19`<br>RST: `GPIO20` | SPI2 (40MHz Blocking) | 独占硬件 SPI，CS 独立拉低，关闭 TF 卡 CS (`GPIO15`) 杜绝总线竞争；复位后发送 Waveshare 完整厂商解锁/电源/伽马初始化序列，再发送 MADCTL/GRAM 窗口数据 |
 | **屏幕背光** | N-MOS 开关电路 | `GPIO7` | LEDC 低速通道 0 (20kHz PWM) | 8位占空比，实现 0..100% 平滑调光与 1.2Hz 正弦脉冲呼吸 |
 | **6轴惯性测量** | QMI8658 6-DOF IMU | SCL: `GPIO8`<br>SDA: `GPIO18`<br>INT1: `GPIO4`<br>INT2: `GPIO5` | I2C0 (400kHz Fast Mode) | I2C 地址 `0x6B`，采用 12 字节连续突发读取以降低总线开销 |
 | **硬件实时时钟** | PCF85063ATL RTC | SCL: `GPIO8`<br>SDA: `GPIO18`<br>INT: `GPIO6` | I2C0 (400kHz Fast Mode) | I2C 地址 `0x51`，与 IMU 共享 I2C0，支持硬件掉电走时与软件自适应回退 |
 | **供电电压检测** | ETA6098 锂电管理 | ADC: `GPIO0`<br>BC_STATUS: `GPIO23` | ADC1 通道 0 (11dB 衰减) + 数字输入 | $R_1=200\text{k}\Omega, R_8=100\text{k}\Omega$ 分压电路，3倍增益换算为轨电压；GPIO23 检测充电状态 |
 | **交互按键** | 侧边 BOOT 按键 | `GPIO9` | 数字输入 (上拉电阻) | 物理低电平有效，硬件 Strapping 引脚；已解耦业务交互，仅供自检诊断透传 |
-| **主机通信** | 原生 USB-Serial-JTAG | D+: `GPIO13`<br>D-: `GPIO12` | 原生异步 USB CDC 虚拟串口 | 免外部串口芯片，供电、通信、日志、烧录一线双用 |
+| **开发/供电接口** | 原生 USB-Serial-JTAG | D+: `GPIO13`<br>D-: `GPIO12` | JTAG、日志、烧录与供电 | 不承载产品业务协议；电脑操作统一走 BLE HID |
 | **内部保护引脚** | 片内 Flash / Strapping | `GPIO24 ~ GPIO30` | 内部硬件保留 | 内部 Flash 总线物理隔离，不在 BSP 和用户态暴露配置 |
 
 ---
@@ -61,6 +61,10 @@ flowchart TD
 5. **屏幕物理朝向校准（`DisplayRotation::Rotate180`）**：
    - 微雪 ESP32-C6-LCD-1.28 的 GC9A01 液晶排线设计与板载 Type-C 接口（位于机身下方 6 点钟位置）呈 180 度反向。
    - 驱动初始化与配置阶段锁定 `DisplayRotation::Rotate180`（通过 MADCTL 寄存器设置 MX=1, MY=1），确保画面顶部（灵动岛胶囊）自然朝向 12 点钟远离 Type-C 口的上方正向，彻底消除默认 Rotate0 下画面上下倒挂的问题。
+
+### 2.3 面板启动诊断
+
+`BandDisplay::new` 在完成硬件复位和 Waveshare 厂商初始化后，短暂刷入红色测试帧再清屏。该可见握手用于区分“SPI/GC9A01/背光未启动”和“应用 UI 本身使用深色背景”两类黑屏问题；串口同时打印 `LCD init complete`、首帧渲染及条带传输错误。
 
 ---
 

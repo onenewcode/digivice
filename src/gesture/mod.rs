@@ -6,14 +6,13 @@ pub mod filter;
 pub use detector::GestureDetector;
 pub use filter::{Attitude, ImuFilter};
 
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Channel;
+pub use crate::ipc::{GESTURE_CHANNEL, GestureChannel};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GestureEvent {
     /// Single tap on device/desk (Dismiss alert / wake screen / snooze)
     SingleTap,
-    /// Double tap on device/desk (Approve AI command / Confirm action)
+    /// Double tap on device/desk (feed or toggle local focus)
     DoubleTap,
     /// Tilt device left by ~18° (Navigate to left view mode: Pet -> Island -> SelfTest)
     TiltLeft,
@@ -47,7 +46,3 @@ impl core::fmt::Display for GestureEvent {
         f.write_str(self.name())
     }
 }
-
-pub type GestureChannel = Channel<CriticalSectionRawMutex, GestureEvent, 16>;
-
-pub static GESTURE_CHANNEL: GestureChannel = Channel::new();

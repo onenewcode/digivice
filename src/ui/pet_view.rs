@@ -1,472 +1,448 @@
-//! Mode D: Cyber Cyclops Pet UI View (赛博独眼灵动桌宠)
+//! Soft mascot renderer for the circular 240x240 display.
 //!
-//! Highly responsive, zero-FPU parametric single-eye digital pet.
-//! Features gravity-tracked iris gaze, Pixar-style dual catchlights,
-//! morphing pupil shapes, and squash-and-stretch eyelid animation.
+//! The pet view intentionally avoids dashboard chrome: a rounded body, expressive eyes,
+//! cheeks and small decorative motion make the device read as a companion at a glance.
+//! Geometry is integer-only so the renderer remains inexpensive on the ESP32-C6.
 
-use super::{
-    CENTER_X, CENTER_Y, COLOR_AMBER, COLOR_BG, COLOR_CAPSULE_BORDER, COLOR_CYAN, COLOR_DARK_GRAY,
-    COLOR_GRAY, COLOR_GREEN, COLOR_RED, COLOR_WHITE, PetMood, PupilShape, UiState,
-};
-use core::fmt::Write;
-use embedded_graphics::mono_font::MonoTextStyle;
-use embedded_graphics::mono_font::ascii::FONT_6X10;
+use super::{CENTER_X, UiState};
+use crate::pet::{PetMood, PupilShape};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{
     Circle, Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, RoundedRectangle, Triangle,
 };
-use embedded_graphics::text::Text;
-use heapless::String;
 
-// Domain Geometry Constants for Cyber Cyclops Eye (eliminates magic numbers)
-pub const IRIS_HALO_RADIUS_PX: i32 = 56;
-pub const IRIS_BODY_RADIUS_PX: i32 = 52;
-pub const IRIS_INNER_RING_RADIUS_PX: i32 = 38;
-pub const PUPIL_RADIUS_PX: i32 = 24;
-pub const CATCHLIGHT_MAIN_RADIUS_PX: u32 = 6;
-pub const CATCHLIGHT_SUB_RADIUS_PX: u32 = 3;
+const PET_BG: Rgb565 = Rgb565::new(31, 54, 23);
+const FUR: Rgb565 = Rgb565::new(31, 38, 21);
+const FUR_LIGHT: Rgb565 = Rgb565::new(31, 49, 28);
+const FUR_SHADOW: Rgb565 = Rgb565::new(24, 26, 16);
+const OUTLINE: Rgb565 = Rgb565::new(8, 10, 8);
+const EYE_WHITE: Rgb565 = Rgb565::new(31, 61, 31);
+const PUPIL: Rgb565 = Rgb565::new(3, 5, 5);
+const PINK: Rgb565 = Rgb565::new(31, 25, 25);
+const PINK_DARK: Rgb565 = Rgb565::new(23, 12, 15);
+const MINT: Rgb565 = Rgb565::new(7, 43, 24);
+const SUN: Rgb565 = Rgb565::new(31, 49, 8);
+const SKY: Rgb565 = Rgb565::new(8, 43, 30);
 
-/// Precomputed 24 orbital tick marks on the 240x240 circular bezel (Zero-FPU LUT).
-/// Radius outer: 114px, radius inner: 107px, 15 degrees per tick.
-const ORBITAL_TICKS: [(Point, Point); 24] = [
-    (Point::new(120, 6), Point::new(120, 13)),
-    (Point::new(150, 10), Point::new(148, 17)),
-    (Point::new(177, 21), Point::new(174, 27)),
-    (Point::new(201, 39), Point::new(196, 44)),
-    (Point::new(219, 63), Point::new(213, 66)),
-    (Point::new(230, 90), Point::new(223, 92)),
-    (Point::new(234, 120), Point::new(227, 120)),
-    (Point::new(230, 150), Point::new(223, 148)),
-    (Point::new(219, 177), Point::new(213, 174)),
-    (Point::new(201, 201), Point::new(196, 196)),
-    (Point::new(177, 219), Point::new(174, 213)),
-    (Point::new(150, 230), Point::new(148, 223)),
-    (Point::new(120, 234), Point::new(120, 227)),
-    (Point::new(90, 230), Point::new(92, 223)),
-    (Point::new(63, 219), Point::new(67, 213)),
-    (Point::new(39, 201), Point::new(44, 196)),
-    (Point::new(21, 177), Point::new(27, 174)),
-    (Point::new(10, 150), Point::new(17, 148)),
-    (Point::new(6, 120), Point::new(13, 120)),
-    (Point::new(10, 90), Point::new(17, 92)),
-    (Point::new(21, 63), Point::new(27, 66)),
-    (Point::new(39, 39), Point::new(44, 44)),
-    (Point::new(63, 21), Point::new(66, 27)),
-    (Point::new(90, 10), Point::new(92, 17)),
-];
-
-/// Render the Cyber Cyclops pet view.
+/// Render the replaceable pet frame as a soft, expressive mascot.
 pub fn render_pet<D: DrawTarget<Color = Rgb565>>(target: &mut D, state: &UiState) {
-    // 1. Outer Orbital HUD Ring
-    render_orbital_ring(target, state);
+    let pet = &state.pet;
+    Rectangle::new(Point::new(0, 0), Size::new(240, 240))
+        .into_styled(PrimitiveStyle::with_fill(PET_BG))
+        .draw(target)
+        .ok();
 
-    // 2. Iris, Pupil and Catchlights
-    render_iris_and_pupil(target, state);
+    render_sparkles(target, pet.mood, pet.anim_tick);
 
-    // 3. Eyelids (Blink & Smile Clipping)
-    render_eyelids(target, state);
+    // A tiny bob keeps the body alive without moving the face out of the safe area.
+    let bob = if pet.happy_lift_pct > 0 {
+        -(((pet.anim_tick / 3) % 4) as i32)
+    } else {
+        0
+    };
+    render_ears(target, bob);
+    render_body(target, bob, pet.mood);
 
-    // 4. Subtle Top/Bottom Status HUD
-    render_pet_hud(target, state);
+    let gaze_x = (pet.gaze_x as i32 / 2).clamp(-9, 9);
+    let gaze_y = (pet.gaze_y as i32 / 3).clamp(-6, 6);
+    let eye_y = 112 + bob + gaze_y;
+    render_eye(
+        target,
+        Point::new(88 + gaze_x, eye_y),
+        pet.pupil_shape,
+        pet.blink_pct,
+        pet.mood,
+    );
+    render_eye(
+        target,
+        Point::new(152 + gaze_x, eye_y),
+        pet.pupil_shape,
+        pet.blink_pct,
+        pet.mood,
+    );
+    render_cheeks(target, bob, pet.mood);
+    render_mouth(target, bob, pet.mood);
+    render_status_charm(target, pet.mood, pet.energy, pet.anim_tick);
 }
 
-/// 1. Outer Orbital HUD Ring: rotating tick pulse reflecting mood & telemetry.
-fn render_orbital_ring<D: DrawTarget<Color = Rgb565>>(target: &mut D, state: &UiState) {
-    let pet = &state.pet;
-    let tick_color = match pet.mood {
-        PetMood::Happy => COLOR_GREEN,
-        PetMood::Focused => COLOR_CYAN,
-        PetMood::Dizzy => COLOR_AMBER,
-        PetMood::Shocked => COLOR_RED,
-        PetMood::Sleepy | PetMood::Sleeping => COLOR_DARK_GRAY,
-        PetMood::Normal => {
-            if state.telemetry.cpu_pct > 75 {
-                COLOR_AMBER
-            } else {
-                COLOR_CYAN
-            }
-        }
-    };
+fn render_ears<D: DrawTarget<Color = Rgb565>>(target: &mut D, bob: i32) {
+    let left = Triangle::new(
+        Point::new(48, 88 + bob),
+        Point::new(67, 36 + bob),
+        Point::new(101, 84 + bob),
+    );
+    left.into_styled(
+        PrimitiveStyleBuilder::new()
+            .fill_color(FUR)
+            .stroke_color(OUTLINE)
+            .stroke_width(3)
+            .build(),
+    )
+    .draw(target)
+    .ok();
+    Triangle::new(
+        Point::new(61, 77 + bob),
+        Point::new(68, 52 + bob),
+        Point::new(87, 78 + bob),
+    )
+    .into_styled(PrimitiveStyle::with_fill(PINK))
+    .draw(target)
+    .ok();
 
-    let active_count = match pet.mood {
-        PetMood::Sleeping => 4,
-        PetMood::Happy | PetMood::Focused => 24,
-        _ => 16,
-    };
+    Triangle::new(
+        Point::new(139, 84 + bob),
+        Point::new(173, 36 + bob),
+        Point::new(192, 88 + bob),
+    )
+    .into_styled(
+        PrimitiveStyleBuilder::new()
+            .fill_color(FUR)
+            .stroke_color(OUTLINE)
+            .stroke_width(3)
+            .build(),
+    )
+    .draw(target)
+    .ok();
+    Triangle::new(
+        Point::new(153, 78 + bob),
+        Point::new(172, 52 + bob),
+        Point::new(179, 77 + bob),
+    )
+    .into_styled(PrimitiveStyle::with_fill(PINK))
+    .draw(target)
+    .ok();
+}
 
-    // Spin offset based on animation tick
-    let offset = ((pet.anim_tick / 4) % 24) as usize;
+fn render_body<D: DrawTarget<Color = Rgb565>>(target: &mut D, bob: i32, mood: PetMood) {
+    let body = Rectangle::new(Point::new(40, 72 + bob), Size::new(160, 132));
+    RoundedRectangle::with_equal_corners(body, Size::new(42, 42))
+        .into_styled(
+            PrimitiveStyleBuilder::new()
+                .fill_color(FUR)
+                .stroke_color(OUTLINE)
+                .stroke_width(3)
+                .build(),
+        )
+        .draw(target)
+        .ok();
 
-    for (i, &(p1, p2)) in ORBITAL_TICKS.iter().enumerate() {
-        let is_active = ((i + offset) % 24) < active_count;
-        let c = if is_active {
-            tick_color
-        } else {
-            COLOR_DARK_GRAY
-        };
-        Line::new(p1, p2)
-            .into_styled(PrimitiveStyle::with_stroke(c, 1))
+    // Belly patch and two soft paws keep the silhouette toy-like instead of mechanical.
+    RoundedRectangle::with_equal_corners(
+        Rectangle::new(Point::new(74, 157 + bob), Size::new(92, 54)),
+        Size::new(22, 22),
+    )
+    .into_styled(PrimitiveStyle::with_fill(FUR_LIGHT))
+    .draw(target)
+    .ok();
+    for x in [58, 158] {
+        Circle::new(Point::new(x, 182 + bob), 32)
+            .into_styled(
+                PrimitiveStyleBuilder::new()
+                    .fill_color(FUR_LIGHT)
+                    .stroke_color(OUTLINE)
+                    .stroke_width(2)
+                    .build(),
+            )
+            .draw(target)
+            .ok();
+    }
+
+    if mood == PetMood::Sleeping {
+        // A muted shadow grounds the sleeping body.
+        Rectangle::new(Point::new(72, 205), Size::new(96, 5))
+            .into_styled(PrimitiveStyle::with_fill(FUR_SHADOW))
             .draw(target)
             .ok();
     }
 }
 
-/// 2. Floating Iris & Morphing Pupil.
-fn render_iris_and_pupil<D: DrawTarget<Color = Rgb565>>(target: &mut D, state: &UiState) {
-    let pet = &state.pet;
-
-    // Center offset clamped to safe radius (center: 120, 120)
-    let gx = (pet.gaze_x as i32).clamp(-18, 18);
-    let gy = (pet.gaze_y as i32).clamp(-18, 18);
-    let center = Point::new(CENTER_X + gx, CENTER_Y + gy);
-
-    // Skip iris rendering when fully closed (sleeping / mid-blink)
-    if pet.blink_pct == 0 {
+fn render_eye<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    center: Point,
+    shape: PupilShape,
+    blink_pct: u8,
+    mood: PetMood,
+) {
+    let closed = blink_pct <= 18 || mood == PetMood::Sleeping;
+    if closed {
+        Line::new(center + Point::new(-13, 0), center + Point::new(-5, 3))
+            .into_styled(PrimitiveStyle::with_stroke(PUPIL, 3))
+            .draw(target)
+            .ok();
+        Line::new(center + Point::new(-5, 3), center + Point::new(5, 3))
+            .into_styled(PrimitiveStyle::with_stroke(PUPIL, 3))
+            .draw(target)
+            .ok();
+        Line::new(center + Point::new(5, 3), center + Point::new(13, 0))
+            .into_styled(PrimitiveStyle::with_stroke(PUPIL, 3))
+            .draw(target)
+            .ok();
         return;
     }
 
-    // Determine Iris primary color
-    let (iris_fill, iris_border) = match pet.mood {
-        PetMood::Happy => (COLOR_GREEN, COLOR_WHITE),
-        PetMood::Focused => (COLOR_CYAN, COLOR_WHITE),
-        PetMood::Dizzy => (COLOR_AMBER, COLOR_RED),
-        PetMood::Shocked => (COLOR_RED, COLOR_WHITE),
-        PetMood::Sleepy | PetMood::Sleeping => (COLOR_DARK_GRAY, COLOR_GRAY),
-        PetMood::Normal => (COLOR_CYAN, COLOR_CAPSULE_BORDER),
-    };
-
-    // A. Outer Iris Halo / Eye Socket Ring
+    let eye_radius = if mood == PetMood::Shocked { 20 } else { 16 };
     Circle::new(
-        center - Point::new(IRIS_HALO_RADIUS_PX, IRIS_HALO_RADIUS_PX),
-        (IRIS_HALO_RADIUS_PX * 2) as u32,
+        center - Point::new(eye_radius, eye_radius),
+        (eye_radius * 2) as u32,
     )
-    .into_styled(PrimitiveStyle::with_stroke(COLOR_DARK_GRAY, 1))
+    .into_styled(
+        PrimitiveStyleBuilder::new()
+            .fill_color(EYE_WHITE)
+            .stroke_color(OUTLINE)
+            .stroke_width(2)
+            .build(),
+    )
     .draw(target)
     .ok();
 
-    // B. Solid Iris Body
-    let iris_style = PrimitiveStyleBuilder::new()
-        .fill_color(iris_fill)
-        .stroke_color(iris_border)
-        .stroke_width(2)
-        .build();
-    Circle::new(
-        center - Point::new(IRIS_BODY_RADIUS_PX, IRIS_BODY_RADIUS_PX),
-        (IRIS_BODY_RADIUS_PX * 2) as u32,
-    )
-    .into_styled(iris_style)
-    .draw(target)
-    .ok();
+    render_pupil(target, center, shape, mood);
 
-    // C. Concentric Sci-Fi Inner Ring
-    Circle::new(
-        center - Point::new(IRIS_INNER_RING_RADIUS_PX, IRIS_INNER_RING_RADIUS_PX),
-        (IRIS_INNER_RING_RADIUS_PX * 2) as u32,
-    )
-    .into_styled(PrimitiveStyle::with_stroke(COLOR_BG, 1))
-    .draw(target)
-    .ok();
-
-    // D. Pupil Rendering based on PupilShape
-    render_pupil(target, center, pet.pupil_shape, pet.anim_tick);
+    // A partial blink is represented by a warm lid sliding over the lower eye.
+    if blink_pct < 100 {
+        let cover_height = ((100 - blink_pct.min(100)) as i32 * eye_radius / 100).max(0);
+        if cover_height > 0 {
+            Rectangle::new(
+                center + Point::new(-eye_radius - 1, eye_radius - cover_height),
+                Size::new((eye_radius * 2 + 2) as u32, cover_height as u32),
+            )
+            .into_styled(PrimitiveStyle::with_fill(FUR))
+            .draw(target)
+            .ok();
+        }
+    }
 }
 
-/// Draw the morphing pupil with catchlights.
 fn render_pupil<D: DrawTarget<Color = Rgb565>>(
     target: &mut D,
     center: Point,
     shape: PupilShape,
-    tick: u16,
+    mood: PetMood,
 ) {
     match shape {
-        PupilShape::Round => {
-            // Standard Deep Black Pupil
-            Circle::new(
-                center - Point::new(PUPIL_RADIUS_PX, PUPIL_RADIUS_PX),
-                (PUPIL_RADIUS_PX * 2) as u32,
+        PupilShape::CatSlit => {
+            RoundedRectangle::with_equal_corners(
+                Rectangle::new(center + Point::new(-4, -11), Size::new(8, 22)),
+                Size::new(4, 4),
             )
-            .into_styled(PrimitiveStyle::with_fill(COLOR_BG))
+            .into_styled(PrimitiveStyle::with_fill(PUPIL))
             .draw(target)
             .ok();
-
-            // Pixar-Style Dual White Catchlights (Glints)
-            // Primary catchlight: upper-left
-            Circle::new(center + Point::new(-14, -14), CATCHLIGHT_MAIN_RADIUS_PX * 2)
-                .into_styled(PrimitiveStyle::with_fill(COLOR_WHITE))
-                .draw(target)
-                .ok();
-
-            // Secondary subtle catchlight: lower-right
-            Circle::new(center + Point::new(8, 8), CATCHLIGHT_SUB_RADIUS_PX * 2)
-                .into_styled(PrimitiveStyle::with_fill(COLOR_WHITE))
-                .draw(target)
-                .ok();
-        }
-        PupilShape::CatSlit => {
-            // Narrow vertical cat slit for extreme focus
-            let slit_rect = Rectangle::new(center - Point::new(6, 26), Size::new(12, 52));
-            RoundedRectangle::with_equal_corners(slit_rect, Size::new(6, 6))
-                .into_styled(PrimitiveStyle::with_fill(COLOR_BG))
-                .draw(target)
-                .ok();
-
-            // Catchlight dot
-            Circle::new(center + Point::new(-2, -10), 4)
-                .into_styled(PrimitiveStyle::with_fill(COLOR_WHITE))
-                .draw(target)
-                .ok();
         }
         PupilShape::Heart => {
-            // Deep black backdrop
-            Circle::new(center - Point::new(24, 24), 48)
-                .into_styled(PrimitiveStyle::with_fill(COLOR_BG))
+            Circle::new(center + Point::new(-10, -7), 13)
+                .into_styled(PrimitiveStyle::with_fill(PINK_DARK))
                 .draw(target)
                 .ok();
-
-            // Geometric Heart Shape (two circular lobes + downward triangle)
-            Circle::new(center + Point::new(-11, -9), 12)
-                .into_styled(PrimitiveStyle::with_fill(COLOR_RED))
+            Circle::new(center + Point::new(-1, -7), 13)
+                .into_styled(PrimitiveStyle::with_fill(PINK_DARK))
                 .draw(target)
                 .ok();
-            Circle::new(center + Point::new(-1, -9), 12)
-                .into_styled(PrimitiveStyle::with_fill(COLOR_RED))
-                .draw(target)
-                .ok();
+            Triangle::new(
+                center + Point::new(-11, 0),
+                center + Point::new(11, 0),
+                center + Point::new(0, 12),
+            )
+            .into_styled(PrimitiveStyle::with_fill(PINK_DARK))
+            .draw(target)
+            .ok();
+        }
+        PupilShape::Star => {
+            Triangle::new(
+                center + Point::new(-11, 3),
+                center + Point::new(11, 3),
+                center + Point::new(0, -12),
+            )
+            .into_styled(PrimitiveStyle::with_fill(SUN))
+            .draw(target)
+            .ok();
             Triangle::new(
                 center + Point::new(-11, -3),
                 center + Point::new(11, -3),
-                center + Point::new(0, 11),
+                center + Point::new(0, 12),
             )
-            .into_styled(PrimitiveStyle::with_fill(COLOR_RED))
+            .into_styled(PrimitiveStyle::with_fill(SUN))
             .draw(target)
             .ok();
-
-            // Tiny catchlight on heart lobe
-            Circle::new(center + Point::new(-7, -7), 3)
-                .into_styled(PrimitiveStyle::with_fill(COLOR_WHITE))
-                .draw(target)
-                .ok();
-        }
-        PupilShape::Star => {
-            Circle::new(center - Point::new(24, 24), 48)
-                .into_styled(PrimitiveStyle::with_fill(COLOR_BG))
-                .draw(target)
-                .ok();
-
-            // 4-point star in amber/gold
-            Triangle::new(
-                center + Point::new(-12, 0),
-                center + Point::new(12, 0),
-                center + Point::new(0, -14),
-            )
-            .into_styled(PrimitiveStyle::with_fill(COLOR_AMBER))
-            .draw(target)
-            .ok();
-            Triangle::new(
-                center + Point::new(-12, 0),
-                center + Point::new(12, 0),
-                center + Point::new(0, 14),
-            )
-            .into_styled(PrimitiveStyle::with_fill(COLOR_AMBER))
-            .draw(target)
-            .ok();
-            Circle::new(center - Point::new(4, 4), 8)
-                .into_styled(PrimitiveStyle::with_fill(COLOR_WHITE))
-                .draw(target)
-                .ok();
         }
         PupilShape::Dizzy => {
-            // Alternating dizzy concentric spirals
-            let r_offset = (tick % 4) as i32;
-            Circle::new(center - Point::new(24, 24), 48)
-                .into_styled(PrimitiveStyle::with_fill(COLOR_BG))
+            Line::new(center + Point::new(-9, -9), center + Point::new(9, 9))
+                .into_styled(PrimitiveStyle::with_stroke(PINK_DARK, 3))
                 .draw(target)
                 .ok();
-            Circle::new(
-                center - Point::new(20 - r_offset, 20 - r_offset),
-                ((20 - r_offset) * 2) as u32,
-            )
-            .into_styled(PrimitiveStyle::with_stroke(COLOR_AMBER, 2))
-            .draw(target)
-            .ok();
-            Circle::new(
-                center - Point::new(12 - r_offset, 12 - r_offset),
-                ((12 - r_offset) * 2) as u32,
-            )
-            .into_styled(PrimitiveStyle::with_stroke(COLOR_WHITE, 2))
-            .draw(target)
-            .ok();
+            Line::new(center + Point::new(-9, 9), center + Point::new(9, -9))
+                .into_styled(PrimitiveStyle::with_stroke(PINK_DARK, 3))
+                .draw(target)
+                .ok();
         }
         PupilShape::Lightning => {
-            Circle::new(center - Point::new(24, 24), 48)
-                .into_styled(PrimitiveStyle::with_fill(COLOR_BG))
-                .draw(target)
-                .ok();
-
-            // Sci-fi lightning bolt in amber
-            Line::new(center + Point::new(3, -16), center + Point::new(-6, 2))
-                .into_styled(PrimitiveStyle::with_stroke(COLOR_AMBER, 3))
-                .draw(target)
-                .ok();
-            Line::new(center + Point::new(-6, 2), center + Point::new(5, 2))
-                .into_styled(PrimitiveStyle::with_stroke(COLOR_AMBER, 3))
-                .draw(target)
-                .ok();
-            Line::new(center + Point::new(5, 2), center + Point::new(-4, 18))
-                .into_styled(PrimitiveStyle::with_stroke(COLOR_AMBER, 3))
-                .draw(target)
-                .ok();
+            Triangle::new(
+                center + Point::new(1, -12),
+                center + Point::new(-8, 1),
+                center + Point::new(2, 1),
+            )
+            .into_styled(PrimitiveStyle::with_fill(SUN))
+            .draw(target)
+            .ok();
+            Triangle::new(
+                center + Point::new(2, 0),
+                center + Point::new(-2, 12),
+                center + Point::new(9, -2),
+            )
+            .into_styled(PrimitiveStyle::with_fill(SUN))
+            .draw(target)
+            .ok();
         }
         PupilShape::Cross => {
-            Circle::new(center - Point::new(24, 24), 48)
-                .into_styled(PrimitiveStyle::with_fill(COLOR_BG))
+            Line::new(center + Point::new(-9, -9), center + Point::new(9, 9))
+                .into_styled(PrimitiveStyle::with_stroke(PINK_DARK, 3))
                 .draw(target)
                 .ok();
-
-            // Red cross error / knockout
-            Line::new(center + Point::new(-12, -12), center + Point::new(12, 12))
-                .into_styled(PrimitiveStyle::with_stroke(COLOR_RED, 3))
+            Line::new(center + Point::new(-9, 9), center + Point::new(9, -9))
+                .into_styled(PrimitiveStyle::with_stroke(PINK_DARK, 3))
                 .draw(target)
                 .ok();
-            Line::new(center + Point::new(-12, 12), center + Point::new(12, -12))
-                .into_styled(PrimitiveStyle::with_stroke(COLOR_RED, 3))
+        }
+        PupilShape::Round => {
+            Circle::new(center - Point::new(8, 8), 16)
+                .into_styled(PrimitiveStyle::with_fill(PUPIL))
                 .draw(target)
                 .ok();
+            Circle::new(center + Point::new(-5, -6), 6)
+                .into_styled(PrimitiveStyle::with_fill(EYE_WHITE))
+                .draw(target)
+                .ok();
+            if mood == PetMood::Happy {
+                Circle::new(center + Point::new(4, 5), 3)
+                    .into_styled(PrimitiveStyle::with_fill(EYE_WHITE))
+                    .draw(target)
+                    .ok();
+            }
         }
     }
 }
 
-/// 3. Eyelids: Smooth zero-FPU integer clipping for blinking and smiling.
-fn render_eyelids<D: DrawTarget<Color = Rgb565>>(target: &mut D, state: &UiState) {
-    let pet = &state.pet;
-
-    // Normal eye vertical span: Y from ~60 to ~180 (height = 120)
-    let blink_pct = pet.blink_pct.min(105);
-
-    if blink_pct < 100 {
-        // Upper eyelid drops down, lower eyelid rises up
-        let drop = ((100 - blink_pct as i32) * 60) / 100;
-
-        let top_lid_y = 60 + drop;
-        let bot_lid_y = 180 - drop;
-
-        // Top eyelid block
-        if top_lid_y > 0 {
-            Rectangle::new(Point::new(0, 0), Size::new(240, top_lid_y as u32))
-                .into_styled(PrimitiveStyle::with_fill(COLOR_BG))
-                .draw(target)
-                .ok();
-        }
-
-        // Bottom eyelid block
-        if bot_lid_y < 240 {
-            Rectangle::new(
-                Point::new(0, bot_lid_y),
-                Size::new(240, (240 - bot_lid_y) as u32),
-            )
-            .into_styled(PrimitiveStyle::with_fill(COLOR_BG))
-            .draw(target)
-            .ok();
-        }
-
-        // When almost fully closed, draw a calm curved sleep line
-        if blink_pct <= 10 {
-            Line::new(Point::new(76, 120), Point::new(164, 120))
-                .into_styled(PrimitiveStyle::with_stroke(COLOR_WHITE, 2))
-                .draw(target)
-                .ok();
-            Line::new(Point::new(68, 116), Point::new(76, 120))
-                .into_styled(PrimitiveStyle::with_stroke(COLOR_GRAY, 1))
-                .draw(target)
-                .ok();
-            Line::new(Point::new(164, 120), Point::new(172, 116))
-                .into_styled(PrimitiveStyle::with_stroke(COLOR_GRAY, 1))
-                .draw(target)
-                .ok();
-        }
-    }
-
-    // Smiling Crescent: Lower eyelid lifts upward into a cheerful arch
-    if pet.happy_lift_pct > 0 && pet.blink_pct > 20 {
-        let lift = ((pet.happy_lift_pct as i32).min(100) * 44) / 100;
-        // Draw an inverted arc mask from bottom in COLOR_BG
-        // Circle centered below screen (120, 240 - lift + 60) with radius 100
-        let mask_center = Point::new(CENTER_X, 240 - lift + 50);
-        Circle::new(mask_center - Point::new(100, 100), 200)
-            .into_styled(PrimitiveStyle::with_fill(COLOR_BG))
-            .draw(target)
-            .ok();
-
-        // Cheerful upward smile accent curve along the edge
-        Circle::new(mask_center - Point::new(100, 100), 200)
-            .into_styled(PrimitiveStyle::with_stroke(COLOR_GREEN, 2))
-            .draw(target)
-            .ok();
-    }
-}
-
-/// 4. Minimal Geek Status Header & Footer.
-fn render_pet_hud<D: DrawTarget<Color = Rgb565>>(target: &mut D, state: &UiState) {
-    let pet = &state.pet;
-
-    // A. Top Mood Label (Y: 28)
-    let mut header_str = String::<24>::new();
-    match pet.mood {
-        PetMood::Happy => {
-            let _ = header_str.push_str("PET: HAPPY ^_^");
-        }
-        PetMood::Focused => {
-            let _ = write!(header_str, "WORK: CPU {}%", state.telemetry.cpu_pct);
-        }
-        PetMood::Dizzy => {
-            let _ = header_str.push_str("PET: DIZZY @_@");
-        }
-        PetMood::Sleeping => {
-            let _ = header_str.push_str("PET: SLEEPING zZ");
-        }
-        PetMood::Sleepy => {
-            let _ = header_str.push_str("PET: SLEEPY -_-");
-        }
-        PetMood::Shocked => {
-            let _ = header_str.push_str("PET: O_O !");
-        }
-        PetMood::Normal => {
-            let _ = write!(header_str, "PET: IDLE [{}%]", pet.energy);
-        }
-    }
-
-    let header_color = match pet.mood {
-        PetMood::Happy => COLOR_GREEN,
-        PetMood::Focused => COLOR_CYAN,
-        PetMood::Dizzy => COLOR_AMBER,
-        PetMood::Shocked => COLOR_RED,
-        _ => COLOR_GRAY,
+fn render_cheeks<D: DrawTarget<Color = Rgb565>>(target: &mut D, bob: i32, mood: PetMood) {
+    let cheek_color = if matches!(mood, PetMood::Sleeping | PetMood::Sleepy) {
+        PINK_DARK
+    } else {
+        PINK
     };
+    for x in [61, 165] {
+        Circle::new(Point::new(x, 143 + bob), 20)
+            .into_styled(PrimitiveStyle::with_fill(cheek_color))
+            .draw(target)
+            .ok();
+        Line::new(Point::new(x + 4, 146 + bob), Point::new(x + 12, 142 + bob))
+            .into_styled(PrimitiveStyle::with_stroke(PINK_DARK, 1))
+            .draw(target)
+            .ok();
+    }
+}
 
-    Text::new(
-        &header_str,
-        Point::new(74, 32),
-        MonoTextStyle::new(&FONT_6X10, header_color),
+fn render_mouth<D: DrawTarget<Color = Rgb565>>(target: &mut D, bob: i32, mood: PetMood) {
+    let nose = Point::new(CENTER_X, 139 + bob);
+    Triangle::new(
+        nose + Point::new(-5, 0),
+        nose + Point::new(5, 0),
+        nose + Point::new(0, 5),
     )
+    .into_styled(PrimitiveStyle::with_fill(PINK_DARK))
+    .draw(target)
+    .ok();
+    if mood == PetMood::Sleeping {
+        Line::new(
+            Point::new(CENTER_X - 10, 151 + bob),
+            Point::new(CENTER_X + 10, 151 + bob),
+        )
+        .into_styled(PrimitiveStyle::with_stroke(PINK_DARK, 2))
+        .draw(target)
+        .ok();
+    } else {
+        Line::new(
+            Point::new(CENTER_X, 144 + bob),
+            Point::new(CENTER_X, 150 + bob),
+        )
+        .into_styled(PrimitiveStyle::with_stroke(PINK_DARK, 2))
+        .draw(target)
+        .ok();
+        Line::new(
+            Point::new(CENTER_X, 150 + bob),
+            Point::new(CENTER_X - 9, 147 + bob),
+        )
+        .into_styled(PrimitiveStyle::with_stroke(PINK_DARK, 2))
+        .draw(target)
+        .ok();
+        Line::new(
+            Point::new(CENTER_X, 150 + bob),
+            Point::new(CENTER_X + 9, 147 + bob),
+        )
+        .into_styled(PrimitiveStyle::with_stroke(PINK_DARK, 2))
+        .draw(target)
+        .ok();
+    }
+}
+
+fn render_sparkles<D: DrawTarget<Color = Rgb565>>(target: &mut D, mood: PetMood, tick: u16) {
+    let color = match mood {
+        PetMood::Happy => SUN,
+        PetMood::Focused => SKY,
+        PetMood::Dizzy => PINK,
+        PetMood::Sleeping | PetMood::Sleepy => MINT,
+        _ => FUR_LIGHT,
+    };
+    let pulse = (tick / 8) % 3;
+    for (x, y) in [(28, 54), (210, 62), (29, 175), (211, 178)] {
+        let arm = 3 + pulse as i32;
+        Line::new(Point::new(x - arm, y), Point::new(x + arm, y))
+            .into_styled(PrimitiveStyle::with_stroke(color, 2))
+            .draw(target)
+            .ok();
+        Line::new(Point::new(x, y - arm), Point::new(x, y + arm))
+            .into_styled(PrimitiveStyle::with_stroke(color, 2))
+            .draw(target)
+            .ok();
+    }
+}
+
+fn render_status_charm<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    mood: PetMood,
+    energy: u8,
+    tick: u16,
+) {
+    let color = match mood {
+        PetMood::Happy => PINK,
+        PetMood::Focused => SKY,
+        PetMood::Sleeping => MINT,
+        _ => SUN,
+    };
+    let y = 30 + ((tick / 10) % 2) as i32;
+    Circle::new(Point::new(112, y), 9)
+        .into_styled(PrimitiveStyle::with_fill(color))
+        .draw(target)
+        .ok();
+    Circle::new(Point::new(120, y), 9)
+        .into_styled(PrimitiveStyle::with_fill(color))
+        .draw(target)
+        .ok();
+    Triangle::new(
+        Point::new(112, y + 4),
+        Point::new(128, y + 4),
+        Point::new(120, y + 17),
+    )
+    .into_styled(PrimitiveStyle::with_fill(color))
     .draw(target)
     .ok();
 
-    // B. Bottom Dock Status: Voltage & Affinity (Y: 216)
-    let mut dock_str = String::<32>::new();
-    let volts = state.v_rail_mv / 1000;
-    let centivolts = (state.v_rail_mv % 1000) / 10;
-    let _ = write!(
-        dock_str,
-        "{}.{:02}V  AFFINITY: {}",
-        volts, centivolts, pet.affinity
-    );
-
-    Text::new(
-        &dock_str,
-        Point::new(56, 216),
-        MonoTextStyle::new(&FONT_6X10, COLOR_GRAY),
-    )
-    .draw(target)
-    .ok();
+    // A tiny energy bar is a status hint, not a dashboard.
+    let width = (energy.min(100) as u32 * 34) / 100;
+    Rectangle::new(Point::new(103, 219), Size::new(34, 4))
+        .into_styled(PrimitiveStyle::with_fill(FUR_SHADOW))
+        .draw(target)
+        .ok();
+    Rectangle::new(Point::new(103, 219), Size::new(width, 4))
+        .into_styled(PrimitiveStyle::with_fill(color))
+        .draw(target)
+        .ok();
 }

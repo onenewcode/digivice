@@ -1,12 +1,31 @@
 //! 2.4GHz BLE 5 Radio Subsystem
+//!
+//! Provides Bluetooth Low Energy advertising, scanning, GATT server, HID consumer
+//! control reporting, and target presence tracking.
 
-pub mod ble_presence;
+pub mod gatt;
+pub mod hid;
+pub mod presence;
 
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::{channel::Channel, signal::Signal};
 use heapless::Vec;
 
-pub use ble_presence::{BlePresenceTracker, TargetBinding};
+pub use gatt::{AdvertisementHandler, HidService, IslandGattServer, MusicService};
+pub use hid::ConsumerControlReport;
+pub use presence::{BlePresenceTracker, TargetBinding, TargetBindingError};
+
+// Re-export centralized IPC channels for radio
+pub use crate::ipc::{
+    BLE_ADVERTISEMENT_CHANNEL, BleAdvertisementChannel, RADIO_REPORT_CHANNEL, RADIO_TARGET_SIGNAL,
+    RadioReportChannel, TARGET_APPLIED_SIGNAL,
+};
+
+/// Presence inferred from the bound BLE target, independent of the application UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PresenceState {
+    Near,
+    #[default]
+    Away,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BleTargetCommand {
@@ -22,8 +41,6 @@ impl From<BleTargetCommand> for Option<TargetBinding> {
         }
     }
 }
-
-pub use crate::proto::PresenceState;
 
 /// Strongly-typed Bluetooth target binding state to eliminate boolean blindness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -70,10 +87,16 @@ impl From<bool> for TargetVisibility {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BleBlipRole {
+    Target,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BleBlip {
     pub hash: u16,
     pub rssi: i8,
-    pub is_target: bool,
+    pub role: BleBlipRole,
 }
 
 #[derive(Debug, Clone)]
@@ -107,10 +130,3 @@ pub struct BleAdvertisement {
     pub addr: [u8; 6],
     pub rssi: i8,
 }
-
-pub type RadioReportChannel = Channel<CriticalSectionRawMutex, RadioReport, 4>;
-pub type BleAdvertisementChannel = Channel<CriticalSectionRawMutex, BleAdvertisement, 32>;
-
-pub static RADIO_REPORT_CHANNEL: RadioReportChannel = Channel::new();
-pub static BLE_ADVERTISEMENT_CHANNEL: BleAdvertisementChannel = Channel::new();
-pub static RADIO_TARGET_SIGNAL: Signal<CriticalSectionRawMutex, BleTargetCommand> = Signal::new();

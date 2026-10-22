@@ -1,7 +1,6 @@
 //! BLE 5 Presence Detection & Beacon Tracker
 
-use super::{BleBlip, TargetVisibility};
-use crate::proto::PresenceState;
+use super::{BleBlip, BleBlipRole, PresenceState, TargetVisibility};
 use embassy_time::{Duration, Instant};
 use heapless::Vec;
 
@@ -96,10 +95,11 @@ impl BlePresenceTracker {
         let hash = ((addr_bytes[0] as u16) ^ (addr_bytes[2] as u16) ^ (addr_bytes[4] as u16))
             | (((addr_bytes[1] as u16) ^ (addr_bytes[3] as u16) ^ (addr_bytes[5] as u16)) << 8);
 
-        let is_target = match self.target_hash {
-            Some(t) => t == hash,
-            None => false,
+        let role = match self.target_hash {
+            Some(t) if t == hash => BleBlipRole::Target,
+            _ => BleBlipRole::Other,
         };
+        let is_target = matches!(role, BleBlipRole::Target);
 
         // Only a bound target contributes to presence state; binding is explicit over host protocol.
         if is_target {
@@ -118,16 +118,12 @@ impl BlePresenceTracker {
         // Update BLE Target Blip Table
         if let Some(existing) = self.blips.iter_mut().find(|b| b.hash == hash) {
             existing.rssi = rssi;
-            existing.is_target = is_target;
+            existing.role = role;
         } else {
             if self.blips.is_full() {
                 self.blips.remove(0);
             }
-            let _ = self.blips.push(BleBlip {
-                hash,
-                rssi,
-                is_target,
-            });
+            let _ = self.blips.push(BleBlip { hash, rssi, role });
         }
     }
 
@@ -145,12 +141,13 @@ impl BlePresenceTracker {
     /// Bind the currently strongest device as target
     pub fn bind_strongest(&mut self) -> Option<u16> {
         if let Some(strongest) = self.blips.iter().max_by_key(|b| b.rssi) {
-            self.target_hash = Some(strongest.hash);
+            let binding = TargetBinding::new(strongest.hash)?;
+            self.target_hash = Some(binding.hash());
             self.smoothed_target_rssi = strongest.rssi as i16;
             self.presence = PresenceState::Near;
             self.target_visibility = TargetVisibility::Visible;
             self.last_seen_target = Instant::now();
-            Some(strongest.hash)
+            Some(binding.hash())
         } else {
             None
         }

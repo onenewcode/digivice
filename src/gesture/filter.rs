@@ -3,6 +3,12 @@
 use crate::board::ImuSample;
 use libm::fabsf;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CalibrationState {
+    Uncalibrated,
+    Calibrated,
+}
+
 /// Zero-FPU fast rational arctangent approximation in degrees.
 /// Typical absolute error is below 0.3 degrees across the 360 degree space.
 /// Replaces heavy `libm::atan2f` software emulation routines on RISC-V RV32IMAC cores.
@@ -53,7 +59,7 @@ pub struct ImuFilter {
     pub heading: f32,
     // Alpha for 1st order LPF (~0.15 for smooth gravity vector at 250Hz)
     alpha: f32,
-    calibrated: bool,
+    calibration: CalibrationState,
 }
 
 impl Default for ImuFilter {
@@ -73,7 +79,7 @@ impl ImuFilter {
             gz_lpf: 1000.0,
             heading: 0.0,
             alpha: 0.28,
-            calibrated: false,
+            calibration: CalibrationState::Uncalibrated,
         }
     }
 
@@ -82,7 +88,7 @@ impl ImuFilter {
         self.gx_bias_mdps = gx;
         self.gy_bias_mdps = gy;
         self.gz_bias_mdps = gz;
-        self.calibrated = true;
+        self.calibration = CalibrationState::Calibrated;
     }
 
     /// Calibrate from a collection of samples recorded while the board is stationary on desk
@@ -102,7 +108,7 @@ impl ImuFilter {
         self.gx_bias_mdps = (sum_gx / count) as i32;
         self.gy_bias_mdps = (sum_gy / count) as i32;
         self.gz_bias_mdps = (sum_gz / count) as i32;
-        self.calibrated = true;
+        self.calibration = CalibrationState::Calibrated;
     }
 
     /// Update filter with a new sample at interval dt_sec (e.g. 0.004s for 250Hz)
