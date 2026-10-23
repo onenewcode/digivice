@@ -12,8 +12,8 @@ use crate::ipc::{
     RADIO_TARGET_SIGNAL, TARGET_APPLIED_SIGNAL,
 };
 use crate::radio::{
-    AdvertisementHandler, BlePresenceTracker, ConsumerControlReport, IslandGattServer, RadioReport,
-    TargetBinding, TargetBindingState,
+    AdvertisementHandler, BlePresenceTracker, ConsumerControlReport, DigiviceGattServer,
+    RadioReport, TargetBinding, TargetBindingState,
 };
 
 const BLE_SCAN_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -33,9 +33,13 @@ pub async fn ble_runner_task(
 ) -> ! {
     println!("BLE HCI host runner started");
     if let Err(err) = runner.run_with_handler(&AdvertisementHandler).await {
-        panic!("BLE HCI host runner exited: {:?}", err);
+        println!("ERROR: BLE HCI host runner exited: {:?}", err);
+    } else {
+        println!("ERROR: BLE HCI host runner returned unexpectedly");
     }
-    panic!("BLE HCI host runner returned unexpectedly");
+    loop {
+        Timer::after(Duration::from_secs(3600)).await;
+    }
 }
 
 /// Task: BLE scan session lifecycle.
@@ -84,14 +88,17 @@ pub async fn ble_peripheral_task(
 ) -> ! {
     Timer::after(Duration::from_secs(1)).await;
     println!("BLE peripheral task initializing GATT server...");
-    let server: IslandGattServer =
-        match IslandGattServer::new_with_config(GapConfig::Peripheral(PeripheralConfig {
-            name: "IslandPet",
+    let server: DigiviceGattServer =
+        match DigiviceGattServer::new_with_config(GapConfig::Peripheral(PeripheralConfig {
+            name: "Digivice",
             appearance: &trouble_host::prelude::appearance::human_interface_device::GENERIC_HUMAN_INTERFACE_DEVICE,
         })) {
             Ok(server) => server,
             Err(err) => {
-                panic!("BLE GATT server initialization failed: {:?}", err);
+                println!("ERROR: BLE GATT server initialization failed: {:?}", err);
+                loop {
+                    Timer::after(Duration::from_secs(3600)).await;
+                }
             }
         };
 
@@ -103,14 +110,14 @@ pub async fn ble_peripheral_task(
                     | trouble_host::prelude::BR_EDR_NOT_SUPPORTED,
             ),
             AdStructure::CompleteServiceUuids16(&[[0x12, 0x18]]), // 0x1812: HID Service
-            AdStructure::CompleteLocalName(b"IslandPet"),
+            AdStructure::CompleteLocalName(b"Digivice"),
         ],
         &mut adv_data,
     )
     .unwrap_or(0);
 
     println!(
-        "BLE advertising prepared: name='IslandPet', adv_len={} bytes",
+        "BLE advertising prepared: name='Digivice', adv_len={} bytes",
         adv_len
     );
 
@@ -127,7 +134,7 @@ pub async fn ble_peripheral_task(
         {
             Ok(advertiser) => {
                 println!(
-                    "BLE advertising ACTIVE as 'IslandPet' (0x1812 HID). Waiting for connection..."
+                    "BLE advertising ACTIVE as 'Digivice' (0x1812 HID). Waiting for connection..."
                 );
                 advertiser
             }
@@ -256,6 +263,9 @@ pub async fn ble_peripheral_task(
 pub async fn radio_presence_task(target: Option<TargetBinding>) -> ! {
     let mut tracker = BlePresenceTracker::new(target);
     let mut ticker = Ticker::every(Duration::from_millis(1000));
+    let mut last_presence = tracker.presence;
+    let mut last_visibility = tracker.target_visibility;
+    let mut last_rssi = tracker.smoothed_target_rssi as i8;
 
     loop {
         let next = select3(
@@ -265,6 +275,7 @@ pub async fn radio_presence_task(target: Option<TargetBinding>) -> ! {
         )
         .await;
 
+        let is_tick = matches!(next, Either3::Third(_));
         match next {
             Either3::First(command) => {
                 tracker.set_target(command.into());
@@ -290,16 +301,25 @@ pub async fn radio_presence_task(target: Option<TargetBinding>) -> ! {
         let now = Instant::now();
         let presence = tracker.update_watchdog(now);
         let rssi = tracker.smoothed_target_rssi as i8;
+        let visibility = tracker.target_visibility;
 
-        let report = RadioReport {
-            target_bound: TargetBindingState::from(tracker.target_hash.is_some()),
-            target_seen: tracker.target_visibility,
-            presence,
-            ble_rssi: rssi,
-            ble_blips: tracker.blips.clone(),
-        };
-        if RADIO_REPORT_CHANNEL.try_send(report).is_err() {
-            println!("WARN: RADIO_REPORT_CHANNEL full");
+        let changed =
+            presence != last_presence || visibility != last_visibility || rssi != last_rssi;
+        if is_tick || changed {
+            last_presence = presence;
+            last_visibility = visibility;
+            last_rssi = rssi;
+
+            let report = RadioReport {
+                target_bound: TargetBindingState::from(tracker.target_hash.is_some()),
+                target_seen: tracker.target_visibility,
+                presence,
+                ble_rssi: rssi,
+                ble_blips: tracker.blips.clone(),
+            };
+            if RADIO_REPORT_CHANNEL.try_send(report).is_err() {
+                println!("WARN: RADIO_REPORT_CHANNEL full");
+            }
         }
     }
 }

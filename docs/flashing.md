@@ -24,7 +24,7 @@ cargo espflash flash --release --chip esp32c6
 
 # 或先编译，再用命令行工具烧录 ELF
 cargo build
-espflash flash --chip esp32c6 target/riscv32imac-unknown-none-elf/debug/island
+espflash flash --chip esp32c6 target/riscv32imac-unknown-none-elf/debug/digivice
 ```
 
 设备端口一般会自动识别，需要时用 `-p /dev/ttyACM0` 指定。

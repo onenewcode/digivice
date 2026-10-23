@@ -52,7 +52,11 @@ pub struct AppStateMachine<P: PetBehavior = DefaultPet> {
 impl AppStateMachine<DefaultPet> {
     /// Create new coordinator initialized from device configuration.
     pub fn new(config: DeviceConfig) -> Self {
-        Self::with_pet(config, DefaultPet::new())
+        let species = crate::pet::PetSpecies::from_stage(config.pet_evolution_stage);
+        Self::with_pet(
+            config,
+            DefaultPet::with_stats_and_species(config.pet_hunger, config.pet_strength, species),
+        )
     }
 }
 
@@ -73,6 +77,7 @@ impl<P: PetBehavior> AppStateMachine<P> {
             focus: FocusSession::default(),
             dirty: true,
         };
+        coordinator.state.pet = coordinator.pet.tick(Instant::now());
         coordinator.update_backlight();
         coordinator
     }
@@ -139,6 +144,14 @@ impl<P: PetBehavior> AppStateMachine<P> {
             }
             // If device is face down, guard against accidental mode changes.
             _ if self.state.is_facedown() => {}
+
+            GestureEvent::Shake => {
+                let now = Instant::now();
+                self.pet.handle(PetEvent::Shake, now);
+                self.state.mode = ViewMode::Pet;
+                println!("Gesture Shake -> Pendulum Training / Evolution");
+                self.dirty = true;
+            }
 
             GestureEvent::SingleTap => {
                 let now = Instant::now();
@@ -245,9 +258,23 @@ impl<P: PetBehavior> AppStateMachine<P> {
         config
     }
 
-    /// Handle RTC time tick.
+    /// Return the updated device configuration snapshot reflecting current pet stats.
+    pub fn current_config(&self) -> DeviceConfig {
+        let mut config = self.config.config();
+        config.pet_hunger = self.state.pet.hunger;
+        config.pet_strength = self.state.pet.strength;
+        config.pet_evolution_stage = self.state.pet.species.stage_index();
+        config
+    }
+
+    /// Handle RTC time tick with edge-triggered circadian hour progression.
     pub fn handle_time(&mut self, dt: DateTime) {
+        let hour_changed = self.state.datetime.hour() != dt.hour();
         self.state.datetime = dt;
+        if hour_changed {
+            self.pet
+                .handle(PetEvent::CircadianHour(dt.hour()), Instant::now());
+        }
         self.dirty = true;
     }
 
@@ -255,10 +282,15 @@ impl<P: PetBehavior> AppStateMachine<P> {
     pub fn handle_power(&mut self, status: PowerStatus) {
         let v_diff = (self.state.v_rail_mv as i32 - status.v_rail_mv as i32).abs();
         let button_changed = self.state.boot_press_state != status.boot_press_state;
-        if v_diff >= 20 || self.state.charge_state != status.charge_state || button_changed {
+        let charge_changed = self.state.charge_state != status.charge_state;
+        if charge_changed {
+            self.pet
+                .handle(PetEvent::ChargeState(status.charge_state), Instant::now());
+        }
+        if v_diff >= 20 || charge_changed || button_changed {
             if button_changed && status.boot_press_state == ButtonPressState::Pressed {
                 println!("BOOT button pressed -> Toggle ViewMode");
-                self.state.mode = self.state.mode.next();
+                self.state.mode = self.state.mode.cycle();
                 self.update_backlight();
             }
             self.state.v_rail_mv = status.v_rail_mv;
@@ -274,6 +306,7 @@ impl<P: PetBehavior> AppStateMachine<P> {
             PetEvent::Attitude {
                 ax_mg: snapshot.sample.ax_mg,
                 ay_mg: snapshot.sample.ay_mg,
+                az_mg: snapshot.sample.az_mg,
             },
             Instant::now(),
         );

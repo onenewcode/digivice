@@ -12,7 +12,7 @@ use crate::ipc::BLE_ADVERTISEMENT_CHANNEL;
 use crate::radio::BleAdvertisement;
 
 #[gatt_server(connections_max = 2, attribute_table_size = 64)]
-pub struct IslandGattServer {
+pub struct DigiviceGattServer {
     pub hid: HidService,
     pub music: MusicService,
 }

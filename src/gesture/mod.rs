@@ -4,19 +4,19 @@ pub mod detector;
 pub mod filter;
 
 pub use detector::GestureDetector;
-pub use filter::{Attitude, ImuFilter};
+pub use filter::{Attitude, ImuFilter, fast_atan2_deg};
 
 pub use crate::ipc::{GESTURE_CHANNEL, GestureChannel};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GestureEvent {
     /// Single tap on device/desk (Dismiss alert / wake screen / snooze)
     SingleTap,
     /// Double tap on device/desk (feed or toggle local focus)
     DoubleTap,
-    /// Tilt device left by ~18° (Navigate to left view mode: Pet -> Island -> SelfTest)
+    /// Tilt device left by ~18° (Navigate to left view mode: Pet -> SelfTest)
     TiltLeft,
-    /// Tilt device right by ~18° (Navigate to right view mode: SelfTest -> Island -> Pet)
+    /// Tilt device right by ~18° (Navigate to right view mode: SelfTest -> Pet)
     TiltRight,
     /// Screen turned face down onto desk (DND / Sleep mode)
     FaceDownEnter,
@@ -24,6 +24,8 @@ pub enum GestureEvent {
     FaceDownExit,
     /// Desk heading rotation update in degrees (0..360)
     HeadingUpdate(u16),
+    /// Physical shake/oscillation (Pendulum training / Digimon evolution)
+    Shake,
 }
 
 impl GestureEvent {
@@ -37,6 +39,7 @@ impl GestureEvent {
             Self::FaceDownEnter => "FaceDownEnter",
             Self::FaceDownExit => "FaceDownExit",
             Self::HeadingUpdate(_) => "Heading",
+            Self::Shake => "Shake",
         }
     }
 }

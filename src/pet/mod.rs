@@ -4,13 +4,22 @@
 //! A future pet can implement `PetBehavior` and be supplied to
 //! `AppStateMachine::with_pet` without changing BLE, focus, storage or display code.
 
+pub mod assets;
 pub mod default;
 mod model;
+pub mod species;
+pub mod sprites;
+pub mod transition;
 
+pub use assets::*;
 pub use default::DefaultPet;
 pub use model::{PetAnimationState, PetFrame, PetMood, PupilShape};
+pub use species::{
+    ActionPhase, LookDirection, MusicDanceStyle, PetAction, PetSpecies, SleepState, StepLeg,
+};
+pub use transition::{InertialTransform, SPRING_SQUASH_LUT, SquashStretch, spring_squash_step};
 
-use crate::domain::{FocusPhase, MusicScene};
+use crate::domain::{ChargeState, FocusPhase, MusicScene};
 use embassy_time::Instant;
 
 /// Events understood by a pet implementation.
@@ -23,7 +32,9 @@ pub enum PetEvent {
     FaceUp,
     FocusPhase(FocusPhase),
     MusicScene(MusicScene),
-    Attitude { ax_mg: i32, ay_mg: i32 },
+    Attitude { ax_mg: i32, ay_mg: i32, az_mg: i32 },
+    ChargeState(ChargeState),
+    CircadianHour(u8),
 }
 
 /// Stable extension point for replaceable pets.

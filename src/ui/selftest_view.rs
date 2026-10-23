@@ -13,7 +13,19 @@ use embedded_graphics::primitives::{Circle, PrimitiveStyle};
 use embedded_graphics::text::Text;
 use heapless::String;
 
-pub fn render_selftest<D: DrawTarget<Color = Rgb565>>(target: &mut D, state: &UiState) {
+#[inline(never)]
+fn draw_label<D: DrawTarget<Color = Rgb565>>(
+    target: &mut D,
+    text: &str,
+    point: Point,
+    color: Rgb565,
+) {
+    let style = MonoTextStyle::new(&FONT_6X10, color);
+    Text::new(text, point, style).draw(target).ok();
+}
+
+#[inline(never)]
+fn render_selftest_frame<D: DrawTarget<Color = Rgb565>>(target: &mut D, state: &UiState) {
     // 1. Outer green circle (R=118, Center 120,120)
     Circle::new(
         Point::new(CENTER_X - RADIUS, CENTER_Y - RADIUS),
@@ -41,108 +53,101 @@ pub fn render_selftest<D: DrawTarget<Color = Rgb565>>(target: &mut D, state: &Ui
         .into_styled(PrimitiveStyle::with_fill(COLOR_CYAN))
         .draw(target)
         .ok();
+}
 
-    // 3. Central Telemetry Lines (Y: 48..190)
-    let text_style = MonoTextStyle::new(&FONT_6X10, COLOR_WHITE);
-    let green_style = MonoTextStyle::new(&FONT_6X10, COLOR_GREEN);
-    let amber_style = MonoTextStyle::new(&FONT_6X10, COLOR_AMBER);
-    let cyan_style = MonoTextStyle::new(&FONT_6X10, COLOR_CYAN);
-
-    // Title
-    Text::new("HARDWARE SELF-TEST", Point::new(65, 42), cyan_style)
-        .draw(target)
-        .ok();
+#[inline(never)]
+fn render_imu_telemetry<D: DrawTarget<Color = Rgb565>>(target: &mut D, state: &UiState) {
+    let mut line_buf = String::<36>::new();
 
     // Line 1: LCD/PWM
-    let mut s1 = String::<32>::new();
-    let _ = write!(s1, "LCD/PWM: OK (BL {}%)", state.backlight_pct);
-    Text::new(&s1, Point::new(32, 62), green_style)
-        .draw(target)
-        .ok();
+    let _ = write!(line_buf, "LCD/PWM: OK (BL {}%)", state.backlight_pct);
+    draw_label(target, &line_buf, Point::new(32, 62), COLOR_GREEN);
 
     // Line 2: IMU WHO_AM_I / Status
     match state.imu_status {
         ImuStatus::HardwarePresent => {
-            Text::new("IMU 0x6B: OK (WHO=0x05)", Point::new(32, 80), green_style)
-                .draw(target)
-                .ok();
+            draw_label(
+                target,
+                "IMU 0x6B: OK (WHO=0x05)",
+                Point::new(32, 80),
+                COLOR_GREEN,
+            );
         }
         ImuStatus::Unavailable(err) => {
-            let mut s2 = String::<36>::new();
-            let _ = write!(s2, "IMU 0x6B: ERR ({})", err);
-            Text::new(&s2, Point::new(32, 80), amber_style)
-                .draw(target)
-                .ok();
+            line_buf.clear();
+            let _ = write!(line_buf, "IMU 0x6B: ERR ({})", err);
+            draw_label(target, &line_buf, Point::new(32, 80), COLOR_AMBER);
         }
     }
 
     // Line 3: ACC (mg)
-    let mut s3 = String::<36>::new();
+    line_buf.clear();
     let _ = write!(
-        s3,
+        line_buf,
         "ACC: X:{:+05} Y:{:+05}",
         state.imu_sample.ax_mg, state.imu_sample.ay_mg
     );
-    Text::new(&s3, Point::new(26, 98), text_style)
-        .draw(target)
-        .ok();
+    draw_label(target, &line_buf, Point::new(26, 98), COLOR_WHITE);
 
-    let mut s3b = String::<36>::new();
-    let _ = write!(s3b, "     Z:{:+05} (mg)", state.imu_sample.az_mg);
-    Text::new(&s3b, Point::new(26, 114), text_style)
-        .draw(target)
-        .ok();
+    line_buf.clear();
+    let _ = write!(line_buf, "     Z:{:+05} (mg)", state.imu_sample.az_mg);
+    draw_label(target, &line_buf, Point::new(26, 114), COLOR_WHITE);
 
     // Line 4: GYR (dps)
-    let mut s4 = String::<36>::new();
+    line_buf.clear();
     let _ = write!(
-        s4,
-        "GYR: Z:{:+04} dps HDG:{}",
+        line_buf,
+        "GYR: Z:{:+04} dps HDG:{:03}",
         state.imu_sample.gz_mdps / 1000,
-        state.heading_deg
+        state.heading_deg as u16
     );
-    Text::new(&s4, Point::new(26, 132), text_style)
-        .draw(target)
-        .ok();
+    draw_label(target, &line_buf, Point::new(26, 132), COLOR_WHITE);
+}
+
+#[inline(never)]
+fn render_system_telemetry<D: DrawTarget<Color = Rgb565>>(target: &mut D, state: &UiState) {
+    let mut line_buf = String::<36>::new();
 
     // Line 5: RTC 0x51
-    let mut s5 = String::<36>::new();
     if state.rtc_status == RtcStatus::HardwarePresent {
         let _ = write!(
-            s5,
+            line_buf,
             "RTC 0x51: {:02}:{:02}:{:02}",
             state.datetime.hour(),
             state.datetime.minute(),
             state.datetime.second()
         );
-        Text::new(&s5, Point::new(26, 150), green_style)
-            .draw(target)
-            .ok();
+        draw_label(target, &line_buf, Point::new(26, 150), COLOR_GREEN);
     } else {
-        let _ = write!(s5, "RTC 0x51: FALLBACK (SOFT)");
-        Text::new(&s5, Point::new(26, 150), amber_style)
-            .draw(target)
-            .ok();
+        draw_label(
+            target,
+            "RTC 0x51: FALLBACK (SOFT)",
+            Point::new(26, 150),
+            COLOR_AMBER,
+        );
     }
 
     // Line 6: PWR Rail & Charging State
-    let mut s6 = String::<36>::new();
+    line_buf.clear();
     let bc = state.charge_state.as_str();
-    let _ = write!(s6, "PWR Rail: {} mV | BC:{}", state.v_rail_mv, bc);
-    Text::new(&s6, Point::new(26, 168), text_style)
-        .draw(target)
-        .ok();
+    let _ = write!(line_buf, "PWR Rail: {} mV | BC:{}", state.v_rail_mv, bc);
+    draw_label(target, &line_buf, Point::new(26, 168), COLOR_WHITE);
 
     // Line 7: BOOT Strapping Pin & Last Gesture
-    let mut s7 = String::<36>::new();
+    line_buf.clear();
     let boot = if state.is_boot_pressed() {
         "PRSD"
     } else {
         "REL "
     };
     let evt = state.last_gesture.map(|g| g.name()).unwrap_or("Ready");
-    let _ = write!(s7, "BOOT:{} EVT:{}", boot, evt);
-    Text::new(&s7, Point::new(26, 186), cyan_style)
-        .draw(target)
-        .ok();
+    let _ = write!(line_buf, "BOOT:{} EVT:{}", boot, evt);
+    draw_label(target, &line_buf, Point::new(26, 186), COLOR_CYAN);
+}
+
+pub fn render_selftest<D: DrawTarget<Color = Rgb565>>(target: &mut D, state: &UiState) {
+    render_selftest_frame(target, state);
+    draw_label(target, "HARDWARE SELF-TEST", Point::new(65, 42), COLOR_CYAN);
+    render_imu_telemetry(target, state);
+    render_system_telemetry(target, state);
 }

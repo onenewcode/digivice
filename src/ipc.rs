@@ -1,7 +1,7 @@
 //! Centralized inter-task communication channels and signals for Embassy concurrency.
 //!
 //! Provides statically allocated, bounded synchronization primitives connecting
-//! the concurrent tasks of the Desktop Island system.
+//! the concurrent tasks of the Digivice system.
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;

@@ -1,4 +1,4 @@
-//! Asynchronous Embassy Concurrency Tasks for Desktop Dynamic Island.
+//! Asynchronous Embassy Concurrency Tasks for ESP32-C6 Digivice.
 //!
 //! Organizes all runtime background tasks, keeping the firmware entry point (`main.rs`)
 //! focused purely on hardware initialization, runtime startup, and task spawning.

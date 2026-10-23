@@ -7,7 +7,7 @@ use esp_println::println;
 use crate::board::display::{Backlight, BandDisplay};
 use crate::domain::ViewMode;
 use crate::ipc::UI_STATE_SIGNAL;
-use crate::ui::pet_view::render_pet;
+use crate::ui::pet_view::{pet_dirty_y_bounds, render_pet};
 use crate::ui::selftest_view::render_selftest;
 use crate::ui::{COLOR_BG, UiState};
 
@@ -23,9 +23,17 @@ pub async fn ui_render_task(
 ) -> ! {
     let mut ui_state = UiState::default();
     let mut breath_idx: usize = 0;
+    let mut was_breathing = false;
+    let mut was_facedown = false;
     let mut needs_render = true;
     let mut reported_first_render = false;
     let mut next_render_retry = Instant::now();
+
+    let mut last_mode: Option<ViewMode> = None;
+    let mut prev_dirty_y: (u16, u16) = (0, 239);
+
+    const FRAME_INTERVAL: Duration = Duration::from_millis(30); // ~33.3 FPS
+    let mut next_frame_deadline = Instant::now();
 
     // 1.2Hz Breathing pulse between 25% and 100% using precomputed integer LUT (Zero-FPU)
     // 28 samples * 30ms interval = 840ms period (~1.19Hz)
@@ -42,9 +50,17 @@ pub async fn ui_render_task(
         }
 
         let is_breathing = ui_state.focus_phase.is_active();
+        if !was_breathing && is_breathing {
+            breath_idx = 0;
+        }
+        was_breathing = is_breathing;
+
+        let is_facedown = ui_state.is_facedown();
+        let just_woke_up = was_facedown && !is_facedown;
+        was_facedown = is_facedown;
 
         // Backlight PWM Management
-        if ui_state.is_facedown() {
+        if is_facedown {
             backlight.set_brightness(0);
         } else if is_breathing {
             breath_idx = (breath_idx + 1) % BREATHING_LUT.len();
@@ -55,21 +71,44 @@ pub async fn ui_render_task(
 
         // Render Frame based on active ViewMode:
         // Skip heavy SPI rendering when device is face down (screen turned off onto desk)
-        if needs_render && !ui_state.is_facedown() && Instant::now() >= next_render_retry {
+        if needs_render && !is_facedown && Instant::now() >= next_render_retry {
             let mode = ui_state.mode;
             if !reported_first_render {
                 println!(
                     "UI first render (mode={:?}, backlight={}%, face_down={})",
-                    mode,
-                    ui_state.backlight_pct,
-                    ui_state.is_facedown()
+                    mode, ui_state.backlight_pct, is_facedown
                 );
                 reported_first_render = true;
             }
-            let render_result = display.render_full_frame(COLOR_BG, |target| match mode {
-                ViewMode::SelfTest => render_selftest(target, &ui_state),
-                ViewMode::Pet => render_pet(target, &ui_state),
-            });
+
+            let render_result = match mode {
+                ViewMode::SelfTest => {
+                    last_mode = Some(ViewMode::SelfTest);
+                    prev_dirty_y = (0, 239);
+                    display.render_full_frame(COLOR_BG, |target| {
+                        render_selftest(target, &ui_state);
+                    })
+                }
+                ViewMode::Pet => {
+                    let is_first_pet_frame = last_mode != Some(ViewMode::Pet) || just_woke_up;
+                    last_mode = Some(ViewMode::Pet);
+
+                    let (cur_min, cur_max) = pet_dirty_y_bounds(&ui_state);
+                    let (flush_min, flush_max) = if is_first_pet_frame {
+                        // Full refresh on entering Pet mode or waking from FaceDown
+                        (0, 239)
+                    } else {
+                        // Expand flush area with previous frame to cleanly erase outer graphics
+                        (cur_min.min(prev_dirty_y.0), cur_max.max(prev_dirty_y.1))
+                    };
+                    prev_dirty_y = (cur_min, cur_max);
+
+                    display.render_partial(flush_min, flush_max, COLOR_BG, |target| {
+                        render_pet(target, &ui_state);
+                    })
+                }
+            };
+
             match render_result {
                 Ok(()) => {
                     needs_render = false;
@@ -77,16 +116,30 @@ pub async fn ui_render_task(
                 Err(err) => {
                     println!("LCD frame render failed: {:?}; retrying in 1s", err);
                     next_render_retry = Instant::now() + Duration::from_secs(1);
+                    // Force full-screen refresh upon recovery to wipe any corrupted panel VRAM
+                    last_mode = None;
+                    prev_dirty_y = (0, 239);
                 }
             }
         }
 
-        // Energy-efficient dirty-gated sleep:
-        // If fluid animation is required (WaitConfirm pulse or Pet mode), step at 30ms;
-        // otherwise, wait reactively for new state arrivals (with 500ms safety timeout for watchdogs).
-        if ui_state.requires_fluid_animation() {
-            Timer::after(Duration::from_millis(30)).await;
+        // Target Deadline Pacing:
+        // For fluid animation (Pet mode or breathing), maintain strict isochronous frame deadlines (~33.3 FPS)
+        // to completely eliminate frame interval jitter.
+        // Suspend high-frequency pacing when device is FaceDown on desk to save CPU cycles and power.
+        if !ui_state.is_facedown() && ui_state.requires_fluid_animation() {
+            let now = Instant::now();
+            if now < next_frame_deadline {
+                Timer::after(next_frame_deadline - now).await;
+                next_frame_deadline += FRAME_INTERVAL;
+            } else {
+                next_frame_deadline = now + FRAME_INTERVAL;
+                // Yield to allow concurrent background tasks (BLE, IMU, App) to progress smoothly
+                Timer::after(Duration::from_millis(1)).await;
+            }
         } else {
+            // Static or FaceDown mode: reset deadline to prevent frame bursts upon re-entering fluid animations
+            next_frame_deadline = Instant::now() + FRAME_INTERVAL;
             match select(
                 UI_STATE_SIGNAL.wait(),
                 Timer::after(Duration::from_millis(500)),

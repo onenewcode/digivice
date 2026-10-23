@@ -5,6 +5,8 @@ pub mod selftest_view;
 pub mod state;
 pub mod theme;
 
+pub use pet_view::{pet_dirty_y_bounds, render_pet};
+pub use selftest_view::render_selftest;
 pub use state::UiState;
 pub use theme::{
     CENTER_X, CENTER_Y, COLOR_AMBER, COLOR_BG, COLOR_CAPSULE_BG, COLOR_CAPSULE_BORDER, COLOR_CYAN,

@@ -1,10 +1,12 @@
 [package]
-edition = "2024"
-name    = "island"
-version = "0.1.0"
+edition     = "2024"
+name        = "digivice"
+version     = "0.1.0"
+description = "Autonomous Desktop Cyberpet & Digivice firmware for ESP32-C6 in pure Rust (#![no_std])"
+repository  = "https://github.com/onenewcode/digivice"
 
 [[bin]]
-name = "island"
+name = "digivice"
 path = "./src/bin/main.rs"
 
 [dependencies]

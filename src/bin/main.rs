@@ -1,4 +1,4 @@
-//! ESP32-C6 Desktop Dynamic Island Firmware Entry Point
+//! ESP32-C6 Digivice Firmware Entry Point
 //!
 //! Serves as the pure composition root: initializes hardware peripherals via the Board Support
 //! Package (BSP), configures the memory heap, loads device settings from flash, instantiates the
@@ -23,10 +23,10 @@ use esp_radio::ble::controller::BleConnector;
 use static_cell::StaticCell;
 use trouble_host::prelude::*;
 
-use island::board::display::{Backlight, BandDisplay};
-use island::board::{Board, BoardPeripherals};
-use island::radio::TargetBinding;
-use island::tasks::*;
+use digivice::board::display::{Backlight, BandDisplay};
+use digivice::board::{Board, BoardPeripherals};
+use digivice::radio::TargetBinding;
+use digivice::tasks::*;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -51,7 +51,7 @@ static BLE_HOST_RESOURCES: StaticCell<trouble_host::HostResources<DefaultPacketP
 )]
 #[esp_rtos::main]
 async fn main(spawner: embassy_executor::Spawner) -> ! {
-    println!("Starting ESP32-C6 Desktop Island...");
+    println!("Starting ESP32-C6 Digivice...");
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);

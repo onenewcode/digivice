@@ -70,19 +70,63 @@ stateDiagram-v2
 ## 3. 倾斜与反扣状态机（Tilt & FaceDown）
 
 ### 3.1 左右倾斜滞后锁定（Tilt Hysteresis）
-当用户左右偏转设备（如左右摇摆切换灵动岛与桌宠视图）时，采用带滞后回差的双门限比较器：
+当用户左右偏转设备（如左右摇摆切换数码兽与工程自检视图）时，采用带滞后回差的双门限比较器：
 - **人体工学轻触门限**：横滚角 $|\text{Roll}| > 18^\circ$（俯仰角放宽至 $< 50^\circ$），且仅需保持 $\ge 60\text{ms}$：
   - $\text{Roll} < -18^\circ \rightarrow$ 触发左倾斜并进入 `LockedLeft`。
   - $\text{Roll} > +18^\circ \rightarrow$ 触发右倾斜并进入 `LockedRight`。
 - **恢复居中门限**：回正至 $|\text{Roll}| < 8^\circ$ 解除锁定，保持防抖回差的同时消除手势顿挫。
 
 ### 3.2 屏幕朝下扣放（FaceDown DND）
-- **进入免打扰**：当过滤后的重力分量 $G_z < -650\text{mg}$（屏幕朝下反扣在桌面），并稳定保持 $\ge 200\text{ms}$ 时，触发进入反扣状态。UI 立即关闭屏幕背光（0% 亮度），电脑守护端激活系统勿扰模式。
+- **进入免打扰**：当过滤后的重力分量 $G_z < -650\text{mg}$（屏幕朝下反扣在桌面），并稳定保持 $\ge 200\text{ms}$ 时，触发进入反扣状态。UI 立即关闭屏幕背光（0% 亮度），本地专注和宠物状态进入睡眠策略。
 - **退出免打扰**：当设备被翻转拾起至 $G_z > 400\text{mg}$，并稳定 $\ge 100\text{ms}$ 时，触发退出反扣状态，屏幕与本地专注/宠物状态恢复。
+
+### 3.3 侧向倾斜直接跟随与抬起姿态恒正原则（Lateral Tilt & Pitch-Invariance）
+为了实现“抬起不改变，同时往哪一侧倾斜就向那一侧”的人机工学物理交互，`DefaultPet` 与 `InertialTransform` 确立了如下姿态解算规则：
+- **抬起不改变原则（Pitch-Invariance on Lift）**：
+  将下方向有效重力基准定义为 Y-Z 平面合成重力分量 $G_{\text{down}} = \sqrt{a_y^2 + a_z^2}$。当用户将圆盘从桌面拿起、抬起或立姿斜放面向自己时（仅发生俯仰 Pitch 变化，侧向加速度 $a_x \approx 0$），数码兽始终坚守正向站立姿态（$0^\circ$），彻底消除手持立姿时意外倒置或乱偏的缺陷；
+- **侧向倾斜直接跟随（Lateral Side-Tilt Responsiveness）**：
+  倾角由侧向重力分量与垂向基准的反正切 $\theta_{\text{tilt}} = \operatorname{fast\_atan2\_deg}(a_x, G_{\text{down}})$ 唯一决定：
+  - **向左侧倾斜（$a_x < -60\text{mg}$）**：倾角负向平滑偏转，数码兽向左侧倾斜并自动转身面向左方；
+  - **向右侧倾斜（$a_x > +60\text{mg}$）**：倾角正向平滑偏转，数码兽向右侧倾斜并自动转身面向右方；
+  - **水平/立姿中位死区（$|a_x| \le 60\text{mg}$）**：消除微小手抖与桌面微平误差，姿态保持 $0^\circ$ 正立。
+- **最短圆弧平滑插值（Shortest-Path Circular EMA）**：
+  在角度 cross $180^\circ$ 边界时，通过取模 `(target - curr).rem_euclid(360)` 自动选择最短旋转路径，消除跨越对顶角时产生 $360^\circ$ 倒转的视觉突变。
+- **倾斜状态自主踱步抑制**：当检测到明显机身侧倾（$|\text{tilt\_deg}| > 8^\circ$）时，主动暂停自主左右踱步（`wander_x`），数码兽集中呈现平衡对抗与侧倾身姿。
 
 ---
 
-## 4. 硬件引脚隔离与纯手势交互原则（GPIO9 Strapping Pin）
+## 4. 真实物理摇晃与钟摆特训引擎（Shake Engine）
+
+为了完美还原初代数码暴龙机（Digital Monster Pendulum）的物理交互体验，`GestureDetector` 内置了纯定点数（Zero-FPU）的动态摇晃检测状态机：
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> PositivePeak: 动态加速度 >= +260mg
+    Idle --> NegativePeak: 动态加速度 <= -260mg
+    PositivePeak --> NegativePeak: 40ms <= dt <= 550ms 且反向加速度 <= -180mg (输出 Shake)
+    NegativePeak --> PositivePeak: 40ms <= dt <= 550ms 且反向加速度 >= +180mg (输出 Shake)
+    PositivePeak --> Idle: dt > 550ms 未反向超时
+    NegativePeak --> Idle: dt > 550ms 未反向超时
+```
+
+### 4.1 Zero-FPU 8位定点数动态加速度高通提取
+在 RV32IMAC 无硬件 FPU 的架构下，重力基准采用 8 位定点数（Q24.8）一阶数字低通滤波追踪：
+$$\text{Base}_{k} = \text{Base}_{k-1} + \frac{A_k \ll 8 - \text{Base}_{k-1}}{128}$$
+滤波时间常数 $\tau \approx 640\text{ms}$，在准确追踪静态重力倾斜的同时，完全不衰减人类 $2 \sim 5\text{Hz}$ 的自然摇晃动态。动态加速度 $A_{\text{dyn}} = (A_k \ll 8 - \text{Base}_k) \gg 8$。
+
+### 4.2 双向滞后反转门限（Dual-Threshold Peak & Reversal）
+- **触发启动门限**：主导轴（X/Y/Z 中动态幅值最大者）绝对值超过 $260\text{mg}$ 进入半波峰值态（`PositivePeak` / `NegativePeak`）。
+- **极性反转识别门限**：加速度越过零点反向达到 $180\text{mg}$ 且周期窗满足 $40\text{ms} \le \Delta t \le 550\text{ms}$（对应人类手持晃动频率 $1.8 \sim 12.5\text{Hz}$），确认为一次有效半波摆动，输出 `GestureEvent::Shake` 并切换到对侧波峰等待下次反转。
+- **高频滤除与超时重置**：$< 40\text{ms}$ 判定为机械碰撞冲击或高频杂波予以忽略；$> 550\text{ms}$ 无反向动作则判定为单次位移并平滑回退至 `Idle`。
+
+### 4.3 互斥抑制与防误触保障
+- **敲击与翻页抑制**：当动态加速度超过 $160\text{mg}$、摇晃进行中及摇晃停止后 $500\text{ms}$ 内，主动将 `tap_state` 强制复位为 `TapState::Idle`，`tilt_state` 强制复位为 `TiltState::Centered`。彻底避免起手晃动时的高急动度冲击被误判为桌面单击/双击（误触发切歌或投喂）或侧倾（误切换视图）。
+- **桌宠视图自动聚焦**：当检测到 `GestureEvent::Shake` 时，应用层自动将当前视图切回 `ViewMode::Pet`，确保用户能即时观察到数码兽蓄力冲刺与数码矩阵粒子升格进化特效。
+
+---
+
+## 5. 硬件引脚隔离与纯手势交互原则（GPIO9 Strapping Pin）
 
 板载侧边按键为 ESP32-C6 的 **BOOT / Strapping 引脚（GPIO9）**：
 
@@ -90,7 +134,7 @@ stateDiagram-v2
   根据硬件规格书说明，GPIO9 在芯片复位期间决定芯片是否进入 ROM 串口下载模式。若在运行期间将其作为交互功能键使用，不仅存在电气竞争风险，且桌面圆形硬件形态下按键不易触达。
 - **免按键纯手势驱动交互（Touchless Physical Gestures）**：
   固件将 GPIO9 完全从业务交互与手势事件通道（`GESTURE_CHANNEL`）中解耦，禁止将 BOOT 键作为功能键使用：
-  - **视图导航**：完全由机身左右倾斜手势（`TiltLeft` / `TiltRight`）驱动，在自检页、桌面灵动岛与桌面电子宠物之间丝滑巡航；
+  - **视图导航**：完全由机身左右倾斜手势（`TiltLeft` / `TiltRight`）驱动，在工程自检页与数码暴龙机主视图之间丝滑巡航；
   - **任务审批与交互**：完全由机身双击轻敲（`DoubleTap`）驱动；
   - **免打扰控制**：完全由屏幕反扣（`FaceDown` / `FaceUp`）驱动。
 - **硬件诊断透传**：

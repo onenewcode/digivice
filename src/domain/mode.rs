@@ -32,7 +32,7 @@ impl TryFrom<u8> for ViewMode {
 
     fn try_from(val: u8) -> Result<Self, Self::Error> {
         match val {
-            0 | 1 | 3 => Ok(ViewMode::Pet), // Legacy Island/Standby tags open the pet view
+            0 | 1 | 3 => Ok(ViewMode::Pet), // Legacy mode tags open the pet view
             2 => Ok(ViewMode::SelfTest),
             other => Err(InvalidViewMode(other)),
         }

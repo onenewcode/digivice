@@ -9,7 +9,7 @@ pub mod presence;
 
 use heapless::Vec;
 
-pub use gatt::{AdvertisementHandler, HidService, IslandGattServer, MusicService};
+pub use gatt::{AdvertisementHandler, DigiviceGattServer, HidService, MusicService};
 pub use hid::ConsumerControlReport;
 pub use presence::{BlePresenceTracker, TargetBinding, TargetBindingError};
 
