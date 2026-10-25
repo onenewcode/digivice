@@ -37,11 +37,11 @@ flowchart TD
 | `ble_peripheral_task` | 广告、HID 通知、MusicScene 写入和 ATT 回复 | 连接断开时清空待发 HID 动作 |
 | `sensor_task` | IMU 校准/滤波、手势、姿态和电源状态采样 | 每 5ms 采样一次；通道满时丢弃可重建手势 |
 | `rtc_power_task` | 读取 PCF85063 并发布 `DateTime` | 每 500ms 更新一次，不接受外部时钟作为真源 |
-| `app_state_task` | `AppStateMachine`、`FocusSession`、`PetBehavior` 和 UI 快照 | 每 25ms 维护一次；事件先于维护 tick 处理 |
+| `app_state_task` | `AppStateMachine`、`PetBehavior` 和 UI 快照 | 每 25ms 维护一次；事件先于维护 tick 处理 |
 | `radio_presence_task` | 目标绑定、RSSI EMA、在席看门狗和广播统计 | 以 1 秒 ticker 为基线发布 `RadioReport`，目标未绑定时保持 `Away` |
-| `ui_render_task` | 消费 `UiState`、管理背光并刷新 GC9A01 | Pet 视图或活动专注阶段约 30ms 一次，否则等待快照或 500ms 安全唤醒 |
+| `ui_render_task` | 消费 `UiState`、管理背光并刷新 GC9A01 | Pet 视图约 30ms 一次，否则等待快照或 500ms 安全唤醒 |
 
-`FocusSession` 和 `PetBehavior` 没有独立任务，它们在 `app_state_task` 中以同步、固定大小的
+`PetBehavior` 没有独立任务，它在 `app_state_task` 中以同步、固定大小的
 状态机推进。类似地，音乐事件由 `ble_peripheral_task` 写入通道，再由应用维护 tick 消费；不
 存在单独的音乐或动画任务。
 
@@ -79,14 +79,14 @@ TARGET_APPLIED_SIGNAL BleTargetCommand    radio_presence_task -> app_state_task
 状态优先级保持为：
 
 ```text
-FaceDown/Sleep > 用户手势 > FocusSession > MusicScene > IdleAnimation
+FaceDown/Sleep > 用户手势 > MusicScene > IdleAnimation
 ```
 
-- FaceDown 让 `AppStateMachine` 暂停专注、让宠物进入睡眠并将背光设为 0；UI 跳过 SPI 刷新；
-- 翻回 FaceUp 后恢复背光、专注剩余时间和宠物唤醒关键帧；
+- FaceDown 让 `AppStateMachine` 让宠物进入深度睡眠并将背光设为 0；UI 跳过 SPI 刷新；
+- 翻回 FaceUp 后恢复背光与宠物唤醒关键帧；
 - 3 秒没有新音乐帧时由应用生成 `Inactive` 场景；
 - BLE、扫描和 UI 的等待分支都使用 Embassy future，可取消且不会持有共享 I2C/SPI 总线；
-- 连接断开只清理 HID 瞬时队列，不清理 RTC、FocusSession、宠物或 UI 快照。
+- 连接断开只清理 HID 瞬时队列，不清理 RTC、宠物或 UI 快照。
 
 ## 4. Flash 布局与 Schema V2 存储结构
 

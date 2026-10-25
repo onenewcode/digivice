@@ -1,7 +1,7 @@
 //! UI presentation state snapshot and frame update requirements.
 
 use crate::board::{ButtonPressState, ChargeState, DateTime, ImuSample, ImuStatus, RtcStatus};
-use crate::domain::{DeviceOrientation, FocusPhase, MusicScene, ViewMode};
+use crate::domain::{DeviceOrientation, MusicScene, ViewMode};
 use crate::gesture::GestureEvent;
 use crate::pet::PetFrame;
 use crate::radio::PresenceState;
@@ -24,7 +24,6 @@ pub struct UiState {
     pub orientation: DeviceOrientation,
     pub backlight_pct: u8,
     pub pet: PetFrame,
-    pub focus_phase: FocusPhase,
     pub music: MusicScene,
 }
 
@@ -54,7 +53,6 @@ impl Default for UiState {
             orientation: DeviceOrientation::FaceUp,
             backlight_pct: 80,
             pet: PetFrame::default(),
-            focus_phase: FocusPhase::Idle,
             music: MusicScene::inactive(Instant::now()),
         }
     }
@@ -64,7 +62,7 @@ impl UiState {
     /// Check whether high-framerate fluid animation loop (~33 FPS) is actively required.
     #[inline]
     pub fn requires_fluid_animation(&self) -> bool {
-        self.mode == ViewMode::Pet || self.focus_phase.is_active()
+        self.mode == ViewMode::Pet
     }
 
     #[inline]

@@ -2,7 +2,7 @@
 //!
 //! Product behavior talks to a small event/frame contract instead of a concrete mascot.
 //! A future pet can implement `PetBehavior` and be supplied to
-//! `AppStateMachine::with_pet` without changing BLE, focus, storage or display code.
+//! `AppStateMachine::with_pet` without changing BLE, storage or display code.
 
 pub mod assets;
 pub mod default;
@@ -19,7 +19,7 @@ pub use species::{
 };
 pub use transition::{InertialTransform, SPRING_SQUASH_LUT, SquashStretch, spring_squash_step};
 
-use crate::domain::{ChargeState, FocusPhase, MusicScene};
+use crate::domain::{ChargeState, MusicScene};
 use embassy_time::Instant;
 
 /// Events understood by a pet implementation.
@@ -28,9 +28,9 @@ pub enum PetEvent {
     Tap,
     DoubleTap,
     Shake,
+    Attack,
     FaceDown,
     FaceUp,
-    FocusPhase(FocusPhase),
     MusicScene(MusicScene),
     Attitude { ax_mg: i32, ay_mg: i32, az_mg: i32 },
     ChargeState(ChargeState),

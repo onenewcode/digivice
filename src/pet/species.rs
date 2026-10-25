@@ -149,7 +149,7 @@ pub enum MusicDanceStyle {
     PopBounce,
     RockHeadbang,
     ChorusFever,
-    FocusNod,
+    RhythmNod,
 }
 
 /// Comprehensive, strongly-typed pet action vocabulary.
@@ -171,11 +171,11 @@ pub enum PetAction {
     },
     SatisfiedGulp,
 
-    // 3. Focus & Training
-    FocusTrainingHop {
+    // 3. Battle Training & Victory
+    TrainingHop {
         beat_tick: u8,
     },
-    FocusVictory,
+    VictoryHop,
 
     // 4. Music Groove (First-Class Pet Action!)
     MusicDance {

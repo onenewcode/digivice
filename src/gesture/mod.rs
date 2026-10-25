@@ -10,13 +10,13 @@ pub use crate::ipc::{GESTURE_CHANNEL, GestureChannel};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GestureEvent {
-    /// Single tap on device/desk (Dismiss alert / wake screen / snooze)
+    /// Single tap on device/desk (pet mascot / play-pause media)
     SingleTap,
-    /// Double tap on device/desk (feed or toggle local focus)
+    /// Double tap on device/desk (feed meat / trigger special attack)
     DoubleTap,
-    /// Tilt device left by ~18° (Navigate to left view mode: Pet -> SelfTest)
+    /// Tilt device left by ~18° (previous track)
     TiltLeft,
-    /// Tilt device right by ~18° (Navigate to right view mode: SelfTest -> Pet)
+    /// Tilt device right by ~18° (next track)
     TiltRight,
     /// Screen turned face down onto desk (DND / Sleep mode)
     FaceDownEnter,

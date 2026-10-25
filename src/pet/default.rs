@@ -8,7 +8,7 @@ use super::species::{
 };
 use super::transition::{InertialTransform, SPRING_SQUASH_LUT, SquashStretch};
 use super::{PetAnimationState, PetBehavior, PetEvent, PetFrame, PetMood, PupilShape};
-use crate::domain::{ChargeState, FocusPhase, MusicMood, MusicScene, MusicSection};
+use crate::domain::{ChargeState, MusicMood, MusicScene, MusicSection};
 use embassy_time::{Duration, Instant};
 use esp_println::println;
 
@@ -37,7 +37,6 @@ pub struct DefaultPet {
     reaction_timer: Option<Instant>,
     shake_count: u8,
     shake_timer: Option<Instant>,
-    focus_phase: FocusPhase,
 
     // Music scene tracking
     last_music_scene: Option<MusicScene>,
@@ -93,6 +92,7 @@ impl DefaultPet {
                 anim_tick: 0,
                 energy: 100,
                 affinity: 0,
+                training_shakes: 0,
             },
             inertial_transform: InertialTransform::new(),
             blink_tick: 0,
@@ -107,7 +107,6 @@ impl DefaultPet {
             reaction_timer: None,
             shake_count: 0,
             shake_timer: None,
-            focus_phase: FocusPhase::Idle,
 
             last_music_scene: None,
             metabolic_tick: 0,
@@ -177,13 +176,14 @@ impl DefaultPet {
         }
     }
 
-    /// Check if current action is uninterruptible (e.g. eating or evolving sequence)
+    /// Check if current action is uninterruptible (e.g. eating, attacking, or evolving sequence)
     fn is_current_uninterruptible(&self) -> bool {
         matches!(
             self.animation.action,
             PetAction::NoticeFood
                 | PetAction::EatingChew { .. }
                 | PetAction::SatisfiedGulp
+                | PetAction::AttackSpecial { .. }
                 | PetAction::Evolving { .. }
         )
     }
@@ -222,23 +222,47 @@ impl DefaultPet {
         self.trigger_action(PetAction::HappyHop, 24);
     }
 
-    /// Handle double tap (Feeding / Roast Meat drop & clean poop)
+    /// Trigger the Digimon's signature special attack.
+    pub fn on_attack(&mut self, now: Instant) {
+        if self.animation.sleep_state.is_sleeping() {
+            return;
+        }
+
+        self.animation.mood = PetMood::Focused;
+        self.animation.pupil_shape = PupilShape::CatSlit;
+        self.animation.affinity = self.animation.affinity.saturating_add(15);
+        self.reaction_timer = Some(now);
+
+        println!(
+            "Special Attack unleashed by {}!",
+            self.animation.species.name()
+        );
+        self.trigger_action(PetAction::AttackSpecial { tick: 0 }, 36);
+    }
+
+    /// Handle double tap:
+    /// - If hungry (hunger < 4): Feed Roast Meat, clean mess, and boost energy.
+    /// - If already full (hunger >= 4): Unleash Signature Special Attack!
     pub fn on_double_tap(&mut self, now: Instant) {
         if self.animation.sleep_state.is_sleeping() {
             self.on_face_up();
             return;
         }
 
-        self.animation.mood = PetMood::Happy;
-        self.animation.pupil_shape = PupilShape::Star;
-        self.animation.hunger = self.animation.hunger.saturating_add(1).min(4);
-        self.animation.energy = self.animation.energy.saturating_add(20).min(100);
-        self.animation.affinity = self.animation.affinity.saturating_add(10);
-        // Feeding also cleans up any accumulated mess
-        self.animation.poop_count = self.animation.poop_count.saturating_sub(1);
-        self.reaction_timer = Some(now);
+        if self.animation.hunger < 4 {
+            self.animation.mood = PetMood::Happy;
+            self.animation.pupil_shape = PupilShape::Star;
+            self.animation.hunger = self.animation.hunger.saturating_add(1).min(4);
+            self.animation.energy = self.animation.energy.saturating_add(20).min(100);
+            self.animation.affinity = self.animation.affinity.saturating_add(10);
+            // Feeding also cleans up any accumulated mess
+            self.animation.poop_count = self.animation.poop_count.saturating_sub(1);
+            self.reaction_timer = Some(now);
 
-        self.trigger_action(PetAction::NoticeFood, 10);
+            self.trigger_action(PetAction::NoticeFood, 10);
+        } else {
+            self.on_attack(now);
+        }
     }
 
     /// Handle shake / Pendulum Shake training
@@ -254,10 +278,12 @@ impl DefaultPet {
         }
         self.shake_timer = Some(now);
         self.shake_count = self.shake_count.saturating_add(1);
+        self.animation.training_shakes = self.shake_count.min(PENDULUM_SHAKE_EVOLUTION_QUOTA);
         self.reaction_timer = Some(now);
 
         if self.shake_count >= PENDULUM_SHAKE_EVOLUTION_QUOTA {
             self.shake_count = 0;
+            self.animation.training_shakes = 0;
             self.animation.mood = PetMood::Happy;
             self.animation.strength = 4;
             self.animation.energy = 100;
@@ -270,7 +296,8 @@ impl DefaultPet {
                 );
                 self.trigger_evolution();
             } else {
-                self.trigger_action(PetAction::FocusVictory, 30);
+                // Ultra stage (Omegamon): unleash Supreme Cannon victory blast!
+                self.trigger_action(PetAction::AttackSpecial { tick: 0 }, 36);
             }
         } else {
             let charge_pct = ((self.shake_count as u16 * 100)
@@ -280,7 +307,7 @@ impl DefaultPet {
                 "Pendulum Shake: swing #{}/{} (charge {}%)",
                 self.shake_count, PENDULUM_SHAKE_EVOLUTION_QUOTA, charge_pct
             );
-            self.trigger_action(PetAction::ShakeChargeSprint { charge_pct }, 12);
+            self.trigger_action(PetAction::ShakeChargeSprint { charge_pct }, 16);
         }
     }
 
@@ -360,37 +387,6 @@ impl DefaultPet {
         }
     }
 
-    /// Synchronize Pomodoro focus session.
-    pub fn on_focus_phase(&mut self, phase: FocusPhase) {
-        self.focus_phase = phase;
-        if self.animation.sleep_state.is_sleeping() || self.reaction_timer.is_some() {
-            return;
-        }
-
-        match phase {
-            FocusPhase::Focus => {
-                self.animation.mood = PetMood::Focused;
-                self.animation.pupil_shape = PupilShape::CatSlit;
-                self.trigger_action(PetAction::FocusTrainingHop { beat_tick: 0 }, 16);
-            }
-            FocusPhase::Completed => {
-                self.animation.mood = PetMood::Happy;
-                self.animation.pupil_shape = PupilShape::Star;
-                self.trigger_action(PetAction::FocusVictory, 30);
-            }
-            FocusPhase::Idle
-            | FocusPhase::ShortBreak
-            | FocusPhase::LongBreak
-            | FocusPhase::Paused => {
-                if self.animation.mood == PetMood::Focused {
-                    self.animation.mood = PetMood::Normal;
-                    self.animation.pupil_shape = PupilShape::Round;
-                    self.animation.action = PetAction::IdleBreathe;
-                }
-            }
-        }
-    }
-
     /// Process Bluetooth GATT MusicScene telemetry.
     pub fn on_music_scene(&mut self, scene: MusicScene, now: Instant) {
         self.last_music_scene = Some(scene);
@@ -418,8 +414,6 @@ impl DefaultPet {
 
         let style = if scene.section == MusicSection::Chorus {
             MusicDanceStyle::ChorusFever
-        } else if self.focus_phase == FocusPhase::Focus {
-            MusicDanceStyle::FocusNod
         } else if scene.energy > 70 || scene.mood == MusicMood::Excited {
             MusicDanceStyle::RockHeadbang
         } else if scene.energy >= 35 || scene.mood == MusicMood::Happy {
@@ -464,11 +458,9 @@ impl DefaultPet {
             .is_some_and(|t| now.duration_since(t) >= Duration::from_secs(3))
         {
             self.reaction_timer = None;
+            self.animation.training_shakes = 0;
             if !self.animation.sleep_state.is_sleeping() {
-                if self.focus_phase == FocusPhase::Focus {
-                    self.animation.mood = PetMood::Focused;
-                    self.animation.pupil_shape = PupilShape::CatSlit;
-                } else if self.animation.hunger == 0 || self.animation.poop_count >= 3 {
+                if self.animation.hunger == 0 || self.animation.poop_count >= 3 {
                     self.animation.mood = PetMood::Dizzy;
                     self.animation.pupil_shape = PupilShape::Dizzy;
                 } else {
@@ -476,6 +468,14 @@ impl DefaultPet {
                     self.animation.pupil_shape = PupilShape::Round;
                 }
             }
+        }
+
+        if self
+            .shake_timer
+            .is_some_and(|t| now.duration_since(t) >= Duration::from_secs(3))
+        {
+            self.shake_count = 0;
+            self.animation.training_shakes = 0;
         }
 
         // 3. Elastic Squash & Stretch Spring Stepper
@@ -531,6 +531,10 @@ impl DefaultPet {
                     && self.action_tick.is_multiple_of(4)
                 {
                     *chew_frame ^= 1;
+                }
+
+                if let PetAction::AttackSpecial { tick } = &mut self.animation.action {
+                    *tick = tick.saturating_add(1);
                 }
 
                 // Evolution sequence progression: digital energy charging
@@ -602,7 +606,6 @@ impl DefaultPet {
         if self.reaction_timer.is_none()
             && self.last_music_scene.is_none_or(|s| !s.is_active(now))
             && !self.animation.sleep_state.is_sleeping()
-            && self.focus_phase != FocusPhase::Focus
             && !matches!(self.animation.action, PetAction::Evolving { .. })
             && self.animation.tilt_deg.abs() <= 8
         {
@@ -677,9 +680,9 @@ impl PetBehavior for DefaultPet {
             PetEvent::Tap => self.on_tap(now),
             PetEvent::DoubleTap => self.on_double_tap(now),
             PetEvent::Shake => self.on_shake(now),
+            PetEvent::Attack => self.on_attack(now),
             PetEvent::FaceDown => self.on_face_down(),
             PetEvent::FaceUp => self.on_face_up(),
-            PetEvent::FocusPhase(phase) => self.on_focus_phase(phase),
             PetEvent::MusicScene(scene) => self.on_music_scene(scene, now),
             PetEvent::Attitude {
                 ax_mg,

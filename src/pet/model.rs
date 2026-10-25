@@ -59,6 +59,7 @@ pub struct PetAnimationState {
     pub energy: u8,
     pub affinity: u16,
     pub wander_x: i8,
+    pub training_shakes: u8,
 }
 
 impl PetAnimationState {
@@ -97,6 +98,7 @@ impl Default for PetAnimationState {
             energy: 100,
             affinity: 0,
             wander_x: 0,
+            training_shakes: 0,
         }
     }
 }
@@ -127,6 +129,7 @@ pub struct PetFrame {
     pub energy: u8,
     pub affinity: u16,
     pub wander_x: i8,
+    pub training_shakes: u8,
 }
 
 impl PetFrame {
@@ -165,6 +168,7 @@ impl From<PetAnimationState> for PetFrame {
             energy: state.energy,
             affinity: state.affinity,
             wander_x: state.wander_x,
+            training_shakes: state.training_shakes,
         }
     }
 }

@@ -9,6 +9,7 @@ use crate::domain::ViewMode;
 use crate::ipc::UI_STATE_SIGNAL;
 use crate::ui::pet_view::{pet_dirty_y_bounds, render_pet};
 use crate::ui::selftest_view::render_selftest;
+use crate::ui::status_view::render_status;
 use crate::ui::{COLOR_BG, UiState};
 
 /// Task 4: UI Rendering Task (GC9A01 Display + Backlight PWM)
@@ -22,8 +23,6 @@ pub async fn ui_render_task(
     backlight: &'static mut Backlight<'static>,
 ) -> ! {
     let mut ui_state = UiState::default();
-    let mut breath_idx: usize = 0;
-    let mut was_breathing = false;
     let mut was_facedown = false;
     let mut needs_render = true;
     let mut reported_first_render = false;
@@ -35,25 +34,12 @@ pub async fn ui_render_task(
     const FRAME_INTERVAL: Duration = Duration::from_millis(30); // ~33.3 FPS
     let mut next_frame_deadline = Instant::now();
 
-    // 1.2Hz Breathing pulse between 25% and 100% using precomputed integer LUT (Zero-FPU)
-    // 28 samples * 30ms interval = 840ms period (~1.19Hz)
-    const BREATHING_LUT: [u8; 28] = [
-        62, 71, 79, 86, 92, 96, 99, 100, 99, 96, 92, 86, 79, 71, 62, 53, 45, 38, 32, 28, 25, 26,
-        28, 32, 38, 45, 53, 58,
-    ];
-
     loop {
         // Fetch latest state if updated
         if let Some(new_state) = UI_STATE_SIGNAL.try_take() {
             ui_state = new_state;
             needs_render = true;
         }
-
-        let is_breathing = ui_state.focus_phase.is_active();
-        if !was_breathing && is_breathing {
-            breath_idx = 0;
-        }
-        was_breathing = is_breathing;
 
         let is_facedown = ui_state.is_facedown();
         let just_woke_up = was_facedown && !is_facedown;
@@ -62,9 +48,6 @@ pub async fn ui_render_task(
         // Backlight PWM Management
         if is_facedown {
             backlight.set_brightness(0);
-        } else if is_breathing {
-            breath_idx = (breath_idx + 1) % BREATHING_LUT.len();
-            backlight.set_brightness(BREATHING_LUT[breath_idx]);
         } else {
             backlight.set_brightness(ui_state.backlight_pct);
         }
@@ -87,6 +70,13 @@ pub async fn ui_render_task(
                     prev_dirty_y = (0, 239);
                     display.render_full_frame(COLOR_BG, |target| {
                         render_selftest(target, &ui_state);
+                    })
+                }
+                ViewMode::Status => {
+                    last_mode = Some(ViewMode::Status);
+                    prev_dirty_y = (0, 239);
+                    display.render_full_frame(COLOR_BG, |target| {
+                        render_status(target, &ui_state);
                     })
                 }
                 ViewMode::Pet => {

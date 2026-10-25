@@ -8,15 +8,15 @@
 
 ```text
 gesture/      设备级物理输入（敲击、倾斜、FaceDown、旋转）
-domain/       核心领域模型（MusicScene, FocusPhase, HidAction, ChargeState）
+domain/       核心领域模型（MusicScene, HidAction, ChargeState）
 pet/          PetBehavior、PetEvent、PetFrame、PetAction、PetSpecies；不依赖传输或渲染
-app/          AppStateMachine 与 FocusSession，本地状态协调
+app/          AppStateMachine，本地状态协调
 ui/           把 UiState/PetFrame 绘制到 LCD
 radio/        BLE 在席、GATT 和 HID 传输适配
 storage/      DeviceConfig、CRC、双扇区和黑匣子存储
 ```
 
-领域类型和 `FocusSession` 可以被不同宠物实现或无屏幕测试复用。`pet/` 不得导入
+领域类型可以被不同宠物实现或无屏幕测试复用。`pet/` 不得导入
 `embedded-graphics`、`radio` 或 `board`，渲染器也不能反向修改宠物的可变状态。
 
 ## 2. `PetBehavior` 契约与领域模型
@@ -32,9 +32,8 @@ pub trait PetBehavior {
 
 `PetEvent` 是固定大小且可复制的输入：
 
-- `Tap`、`DoubleTap`、`Shake`：本地互动、投喂与钟摆特训；
+- `Tap`、`DoubleTap`、`Shake`、`Attack`：本地互动、投喂、钟摆特训与必杀释放；
 - `FaceDown`、`FaceUp`：屏幕翻转睡眠与唤醒；
-- `FocusPhase(FocusPhase)`：本地专注节律；
 - `MusicScene(MusicScene)`：节拍、能量、情绪和段落；
 - `Attitude { ax_mg, ay_mg, az_mg }`：三轴重力加速度与侧倾姿态解算输入；
 - `ChargeState(ChargeState)`：USB 供电与锂电池充电状态；
@@ -97,18 +96,21 @@ pub trait PetBehavior {
 
 当前 `AppStateMachine` 的交互映射如下：
 
-| 输入            | 本地宠物/专注行为             | 可选 BLE HID 动作 |
-| --------------- | ----------------------------- | ----------------- |
-| `SingleTap`     | 抚摸宠物并切换 `FocusSession` | `PlayPause`       |
-| `DoubleTap`     | 奖励宠物、提升能量和亲密度    | `NextTrack`       |
-| `TiltLeft`      | 触发宠物短反应                | `PreviousTrack`   |
-| `TiltRight`     | 触发宠物短反应                | `NextTrack`       |
-| `Shake`         | 钟摆特训 (摇动10次蓄满力量并触发数码矩阵进化) | 无                |
-| `FaceDownEnter` | 暂停专注并进入睡眠            | 无                |
-| `FaceDownExit`  | 恢复专注剩余时间并唤醒        | 无                |
+| 输入 | 场景条件 | 本地数码兽行为 | 可选 BLE HID 动作 |
+| :--- | :--- | :--- | :--- |
+| `SingleTap` | 日常状态 | 抚摸宠物，好感度 $+5$，触发 `HappyHop` 与爱心特效 | `PlayPause` |
+| `DoubleTap` | 饥饿度 $< 4$ | 投喂烤肉，饱腹 $+1$、能量 $+20$、好感 $+10$，清理 1 坨便便 | `NextTrack` |
+| `DoubleTap` | 饥饿度 $= 4$ (满腹) | **激发战斗战意，释放专属必杀技 `AttackSpecial`** | `NextTrack` |
+| `TiltLeft` | 日常状态 | 机身侧倾平衡反应，消除误喂副作用 | `PreviousTrack` |
+| `TiltRight` | 日常状态 | 机身侧倾平衡反应，消除误喂副作用 | `NextTrack` |
+| `Shake` (1..9次) | 3秒内连续摆动 | **钟摆特训蓄力**，触发 `ShakeChargeSprint` 并实时刷新 10 段式计量槽 | 无 |
+| `Shake` (第10次) | 特训达标 | 力量填满 4 格、能量 100%；可进化时触发数码矩阵升格，终阶释放究极必杀 | 自动保存至双扇区存储 |
+| `FaceDownEnter` | 反扣桌面 | 背光 0% 熄灭，数码兽进入 `SleepingZzz` 深度睡眠 | 无 |
+| `FaceDownExit` | 拾起正面朝上 | 恢复背光，数码兽触发 `StretchAndYawn` 伸展苏醒 | 无 |
+| `BOOT` (短按) | 任意视窗 | 循环轮播切换视窗：`Pet` $\to$ `Status` $\to$ `SelfTest` $\to$ `Pet` | 无 |
 
 HID 发送通过 `HID_ACTION_CHANNEL` 完成；宠物行为本身不能直接发送 BLE 报告。没有 BLE 客户端
-时，HID 动作被丢弃，本地宠物和专注状态仍然更新。
+时，HID 动作被丢弃，本地宠物状态仍然更新。
 
 ## 5. 替换方式与扩展规则
 

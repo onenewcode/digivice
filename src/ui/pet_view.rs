@@ -53,6 +53,11 @@ pub fn pet_dirty_y_bounds(state: &UiState) -> (u16, u16) {
     if state.music.bpm > 0 || state.pet.music_beat_pulse > 0 || state.pet.tilt_deg != 0 {
         // Full screen outer audio visualizer ring or dynamic tilt rotation across bands
         (0, 239)
+    } else if state.pet.training_shakes > 0
+        || matches!(state.pet.action, PetAction::ShakeChargeSprint { .. })
+    {
+        // Encompasses Top HUD down through bottom Pendulum Training HUD (Y: 18..204)
+        (18, 204)
     } else {
         // Encompasses Top HUD (Y: 18..34), Koromon with lifted ears (Y: 45..164),
         // and cyber platform base (Y: 160..178)
@@ -104,6 +109,11 @@ pub fn render_pet(target: &mut BandTarget, state: &UiState) {
 
     // 6. Draw Top Stats HUD (Hunger Hearts & Strength Bolts) as topmost overlay
     render_stats_hud(target, band_y, pet.hunger, pet.strength);
+
+    // 7. Draw Pendulum Shake Training Gauge if actively shaking
+    if pet.training_shakes > 0 || matches!(pet.action, PetAction::ShakeChargeSprint { .. }) {
+        render_pendulum_training_hud(target, band_y, pet.training_shakes);
+    }
 }
 
 /// Render dark cyber background and circular platform floor.
@@ -180,10 +190,11 @@ fn render_koromon_anatomy(
         || matches!(
             pet.action,
             PetAction::HappyHop
-                | PetAction::FocusVictory
+                | PetAction::VictoryHop
                 | PetAction::AttackSpecial { .. }
                 | PetAction::MusicDance { .. }
                 | PetAction::SuspendedKick
+                | PetAction::ShakeChargeSprint { .. }
         );
 
     let body_sprite = if is_action {
@@ -211,13 +222,13 @@ fn render_koromon_anatomy(
         body_sprite.blit_to_band_scaled(buffer, band_y, body_ox, body_oy, SCALE, flip);
     }
 
-    // Headband (if training or focus phase)
+    // Headband (if training or victory)
     if matches!(
         pet.action,
-        PetAction::FocusTrainingHop { .. }
-            | PetAction::FocusVictory
+        PetAction::TrainingHop { .. }
+            | PetAction::VictoryHop
             | PetAction::MusicDance {
-                style: MusicDanceStyle::FocusNod,
+                style: MusicDanceStyle::RhythmNod,
                 ..
             }
     ) {
@@ -295,10 +306,11 @@ fn render_agumon_anatomy(
         || matches!(
             pet.action,
             PetAction::HappyHop
-                | PetAction::FocusVictory
+                | PetAction::VictoryHop
                 | PetAction::AttackSpecial { .. }
                 | PetAction::MusicDance { .. }
                 | PetAction::SuspendedKick
+                | PetAction::ShakeChargeSprint { .. }
         );
 
     let body_sprite = if is_action {
@@ -328,7 +340,7 @@ fn render_agumon_anatomy(
     // Pepper Breath Fireball Effect (Special attack, training, or victory)
     if matches!(
         pet.action,
-        PetAction::AttackSpecial { .. } | PetAction::FocusVictory
+        PetAction::AttackSpecial { .. } | PetAction::VictoryHop
     ) {
         let fx_ox = if flip.is_flipped() {
             base_x + 24
@@ -362,10 +374,11 @@ fn render_greymon_anatomy(
         || matches!(
             pet.action,
             PetAction::HappyHop
-                | PetAction::FocusVictory
+                | PetAction::VictoryHop
                 | PetAction::AttackSpecial { .. }
                 | PetAction::MusicDance { .. }
                 | PetAction::SuspendedKick
+                | PetAction::ShakeChargeSprint { .. }
         );
 
     let body_sprite = if is_action {
@@ -395,7 +408,7 @@ fn render_greymon_anatomy(
     // Mega Flame Colossal Firestorm (Special attack, training, or victory)
     if matches!(
         pet.action,
-        PetAction::AttackSpecial { .. } | PetAction::FocusVictory
+        PetAction::AttackSpecial { .. } | PetAction::VictoryHop
     ) {
         let fx_ox = if flip.is_flipped() {
             base_x + 24
@@ -436,10 +449,11 @@ fn render_metal_greymon_anatomy(
         || matches!(
             pet.action,
             PetAction::HappyHop
-                | PetAction::FocusVictory
+                | PetAction::VictoryHop
                 | PetAction::AttackSpecial { .. }
                 | PetAction::MusicDance { .. }
                 | PetAction::SuspendedKick
+                | PetAction::ShakeChargeSprint { .. }
         );
 
     let body_sprite = if is_action {
@@ -469,7 +483,7 @@ fn render_metal_greymon_anatomy(
     // Giga Destroyer Twin Cruise Missiles (Special attack, training, or victory)
     if matches!(
         pet.action,
-        PetAction::AttackSpecial { .. } | PetAction::FocusVictory
+        PetAction::AttackSpecial { .. } | PetAction::VictoryHop
     ) {
         let fx_ox = if flip.is_flipped() {
             base_x + 20
@@ -510,10 +524,11 @@ fn render_wargreymon_anatomy(
         || matches!(
             pet.action,
             PetAction::HappyHop
-                | PetAction::FocusVictory
+                | PetAction::VictoryHop
                 | PetAction::AttackSpecial { .. }
                 | PetAction::MusicDance { .. }
                 | PetAction::SuspendedKick
+                | PetAction::ShakeChargeSprint { .. }
         );
 
     let body_sprite = if is_action {
@@ -543,7 +558,7 @@ fn render_wargreymon_anatomy(
     // Gaia Force Miniature Sun Energy Sphere (Held high overhead)
     if matches!(
         pet.action,
-        PetAction::AttackSpecial { .. } | PetAction::FocusVictory
+        PetAction::AttackSpecial { .. } | PetAction::VictoryHop
     ) {
         WAR_GREYMON_ATTACK_GAIA_FORCE.blit_to_band_scaled(
             buffer,
@@ -579,10 +594,11 @@ fn render_omegamon_anatomy(
         || matches!(
             pet.action,
             PetAction::HappyHop
-                | PetAction::FocusVictory
+                | PetAction::VictoryHop
                 | PetAction::AttackSpecial { .. }
                 | PetAction::MusicDance { .. }
                 | PetAction::SuspendedKick
+                | PetAction::ShakeChargeSprint { .. }
         );
 
     let body_sprite = if is_action {
@@ -612,7 +628,7 @@ fn render_omegamon_anatomy(
     // Garuru Cannon Supreme Cannon Cryo-Energy Blast
     if matches!(
         pet.action,
-        PetAction::AttackSpecial { .. } | PetAction::FocusVictory
+        PetAction::AttackSpecial { .. } | PetAction::VictoryHop
     ) {
         let fx_ox = if flip.is_flipped() {
             base_x + 24
@@ -753,6 +769,41 @@ fn render_stats_hud(target: &mut BandTarget, band_y: i32, hunger: u8, strength: 
             COLOR_EMPTY_SLOT
         };
         Rectangle::new(Point::new(x, 24), Size::new(8, 6))
+            .into_styled(PrimitiveStyle::with_fill(color))
+            .draw(target)
+            .ok();
+    }
+}
+
+/// Render retro Digivice Pendulum Training 10-swing energy gauge at bottom safe zone (Y: 184..196).
+fn render_pendulum_training_hud(target: &mut BandTarget, band_y: i32, shakes: u8) {
+    let band_bottom = band_y + BAND_HEIGHT as i32;
+    if 198 < band_y || 182 >= band_bottom {
+        return;
+    }
+
+    // Outer cyber gauge frame (X: 62..178, Y: 184..196, width 116, height 12)
+    embedded_graphics::primitives::RoundedRectangle::with_equal_corners(
+        Rectangle::new(Point::new(62, 184), Size::new(116, 12)),
+        Size::new(4, 4),
+    )
+    .into_styled(PrimitiveStyle::with_stroke(COLOR_PLATFORM_RIM, 1))
+    .draw(target)
+    .ok();
+
+    // 10 Energy Segments (Quota = 10)
+    for i in 0..10 {
+        let x = 65 + (i * 11);
+        let color = if (i as u8) < shakes {
+            if shakes >= 10 {
+                COLOR_EQ_CYAN
+            } else {
+                COLOR_EQ_GOLD
+            }
+        } else {
+            COLOR_EMPTY_SLOT
+        };
+        Rectangle::new(Point::new(x, 186), Size::new(8, 8))
             .into_styled(PrimitiveStyle::with_fill(color))
             .draw(target)
             .ok();

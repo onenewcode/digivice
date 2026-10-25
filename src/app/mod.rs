@@ -1,17 +1,15 @@
 //! Application coordinator and device-level state machine.
 //!
-//! Product focus rhythm lives in `app::focus`, domain models in `domain`, mascot behavior in `pet`,
-//! and transport details in `radio`. This module translates events between those layers and
-//! publishes a UI snapshot, keeping each subsystem replaceable.
+//! Domain models live in `domain`, mascot behavior in `pet`, and transport details in `radio`.
+//! This module translates events between those layers and publishes a UI snapshot,
+//! keeping each subsystem replaceable.
 
 mod config;
-pub mod focus;
 
 pub use config::ConfigState;
-pub use focus::FocusSession;
 
 use crate::board::{ButtonPressState, DateTime, ImuAttitudeSnapshot, PowerStatus};
-use crate::domain::{DeviceOrientation, FocusEvent, HidAction, MusicMood, MusicScene, ViewMode};
+use crate::domain::{DeviceOrientation, HidAction, MusicMood, MusicScene, ViewMode};
 use crate::gesture::GestureEvent;
 use crate::ipc::HID_ACTION_CHANNEL;
 use crate::pet::{DefaultPet, PetBehavior, PetEvent};
@@ -45,7 +43,6 @@ pub struct AppStateMachine<P: PetBehavior = DefaultPet> {
     state: UiState,
     config: ConfigState,
     pet: P,
-    focus: FocusSession,
     dirty: bool,
 }
 
@@ -74,7 +71,6 @@ impl<P: PetBehavior> AppStateMachine<P> {
             state,
             config: ConfigState::from_persisted(config),
             pet,
-            focus: FocusSession::default(),
             dirty: true,
         };
         coordinator.state.pet = coordinator.pet.tick(Instant::now());
@@ -130,16 +126,12 @@ impl<P: PetBehavior> AppStateMachine<P> {
                 let now = Instant::now();
                 self.state.orientation = DeviceOrientation::FaceDown;
                 self.pet.handle(PetEvent::FaceDown, now);
-                self.focus.apply(FocusEvent::FaceDown, now);
-                self.sync_focus_state();
                 self.update_backlight();
             }
             GestureEvent::FaceDownExit => {
                 let now = Instant::now();
                 self.state.orientation = DeviceOrientation::FaceUp;
                 self.pet.handle(PetEvent::FaceUp, now);
-                self.focus.apply(FocusEvent::FaceUp, now);
-                self.sync_focus_state();
                 self.update_backlight();
             }
             // If device is face down, guard against accidental mode changes.
@@ -156,30 +148,30 @@ impl<P: PetBehavior> AppStateMachine<P> {
             GestureEvent::SingleTap => {
                 let now = Instant::now();
                 self.pet.handle(PetEvent::Tap, now);
-                self.focus.toggle(now);
-                self.sync_focus_state();
-                println!("Gesture SingleTap -> Toggle Play/Pause");
+                println!("Gesture SingleTap -> Pet Mascot & Play/Pause");
                 if HID_ACTION_CHANNEL.try_send(HidAction::PlayPause).is_err() {
                     println!("WARN: HID_ACTION_CHANNEL full; dropping media action");
                 }
+                self.dirty = true;
             }
             GestureEvent::DoubleTap => {
                 let now = Instant::now();
-                self.pet.handle(PetEvent::DoubleTap, now);
-                println!("Gesture DoubleTap -> Next Track");
+                if self.state.pet.hunger >= 4 {
+                    self.pet.handle(PetEvent::Attack, now);
+                    println!("Gesture DoubleTap (Full Hunger) -> Special Attack & Next Track");
+                } else {
+                    self.pet.handle(PetEvent::DoubleTap, now);
+                    println!("Gesture DoubleTap -> Feed & Next Track");
+                }
                 let _ = HID_ACTION_CHANNEL.try_send(HidAction::NextTrack);
                 self.dirty = true;
             }
             GestureEvent::TiltLeft => {
-                let now = Instant::now();
-                self.pet.handle(PetEvent::Tap, now);
                 println!("Gesture TiltLeft -> Previous Track");
                 let _ = HID_ACTION_CHANNEL.try_send(HidAction::PreviousTrack);
                 self.dirty = true;
             }
             GestureEvent::TiltRight => {
-                let now = Instant::now();
-                self.pet.handle(PetEvent::DoubleTap, now);
                 println!("Gesture TiltRight -> Next Track");
                 let _ = HID_ACTION_CHANNEL.try_send(HidAction::NextTrack);
                 self.dirty = true;
@@ -289,7 +281,7 @@ impl<P: PetBehavior> AppStateMachine<P> {
         }
         if v_diff >= 20 || charge_changed || button_changed {
             if button_changed && status.boot_press_state == ButtonPressState::Pressed {
-                println!("BOOT button pressed -> Toggle ViewMode");
+                println!("BOOT button pressed -> Cycle ViewMode");
                 self.state.mode = self.state.mode.cycle();
                 self.update_backlight();
             }
@@ -300,7 +292,7 @@ impl<P: PetBehavior> AppStateMachine<P> {
         }
     }
 
-    /// Handle IMU sample update via strongly-typed ImuAttitudeSnapshot (only marks dirty if in SelfTest view).
+    /// Handle IMU sample update via strongly-typed ImuAttitudeSnapshot (marks dirty for interactive views).
     pub fn handle_imu(&mut self, snapshot: ImuAttitudeSnapshot) {
         self.pet.handle(
             PetEvent::Attitude {
@@ -313,37 +305,24 @@ impl<P: PetBehavior> AppStateMachine<P> {
         self.state.imu_sample = snapshot.sample;
         self.state.heading_deg = snapshot.heading_deg;
         self.state.imu_status = snapshot.imu_status;
-        if self.state.mode == ViewMode::SelfTest || self.state.mode == ViewMode::Pet {
-            self.dirty = true;
-        }
-    }
-
-    fn sync_focus_state(&mut self) {
-        let phase = self.focus.phase();
-        if self.state.focus_phase != phase {
-            self.state.focus_phase = phase;
-            self.pet.handle(PetEvent::FocusPhase(phase), Instant::now());
+        if self.state.mode == ViewMode::SelfTest
+            || self.state.mode == ViewMode::Pet
+            || self.state.mode == ViewMode::Status
+        {
             self.dirty = true;
         }
     }
 
     /// Periodic local state tick; never depends on USB or a host heartbeat.
     pub fn tick(&mut self, now: Instant) {
-        // 1. Advance local focus rhythm independently of connectivity.
-        let previous_focus = self.focus.phase();
-        let focus_phase = self.focus.tick(now);
-        if focus_phase != previous_focus {
-            self.sync_focus_state();
-        }
-
-        // 2. Expire music input without making the radio a source of truth.
+        // 1. Expire music input without making the radio a source of truth.
         if !self.state.music.is_active(now) && self.state.music.mood != MusicMood::Unknown {
             self.state.music = MusicScene::inactive(now);
             self.pet.handle(PetEvent::MusicScene(self.state.music), now);
             self.dirty = true;
         }
 
-        // 3. Update Pet Behavior Engine
+        // 2. Update Pet Behavior Engine
         let new_pet = self.pet.tick(now);
         if self.state.pet != new_pet {
             self.state.pet = new_pet;

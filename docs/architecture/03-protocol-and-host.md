@@ -1,7 +1,7 @@
 # 03. BLE 外设与 USB 调试边界
 
 本章描述当前固件已经实现的无线业务和 USB 端口边界。设备的业务状态在本地运行；USB-C
-不承载产品协议，BLE 连接也只是可选增强，断开后不会停止专注、宠物或显示任务。
+不承载产品协议，BLE 连接也只是可选增强，断开后不会停止宠物或显示任务。
 
 ## 1. 链路职责
 
@@ -14,7 +14,7 @@
 当前 GATT 属性表只有 HID Service 和 Music Service。配置写入、统计导出以及文件传输不属于
 本版本的无线协议，不能在文档或实现中假定存在这些服务。
 
-USB 不进入 `AppStateMachine`，也不会覆盖 RTC、专注、宠物或显示状态。USB 拔出、日志端口
+USB 不进入 `AppStateMachine`，也不会覆盖 RTC、宠物或显示状态。USB 拔出、日志端口
 关闭和 BLE 断开都不应成为本地状态机的停止条件。
 
 ## 2. BLE HID Consumer Control
@@ -57,7 +57,7 @@ flags: u8             // 当前保留
 
 `MusicScene::from_frame` 会检查长度、版本和 BPM；无效写入返回 ATT 错误，不进入应用通道。
 应用协调器使用带回绕比较的 `sequence` 丢弃旧帧，且在 `3s` 没有新帧时生成 `Inactive` 场景。
-音乐只改变宠物的低优先级情绪反应，不能覆盖 FaceDown、专注暂停或用户手势。
+音乐只改变宠物的低优先级情绪反应，不能覆盖 FaceDown 或用户手势。
 
 ## 4. 在席扫描与事件边界
 
@@ -86,4 +86,4 @@ stateDiagram-v2
 
 `ble_runner_task` 独占 HCI runner；`ble_scan_task` 管理扫描会话；`ble_peripheral_task` 负责
 广告、GATT 请求和 HID 通知。所有业务队列均为固定容量，MusicScene 通道满时向客户端返回
-资源错误，不能让 BLE 等待占用传感器、专注或渲染任务。
+资源错误，不能让 BLE 等待占用传感器或渲染任务。

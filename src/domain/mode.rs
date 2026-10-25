@@ -4,6 +4,7 @@
 pub enum ViewMode {
     #[default]
     Pet,
+    Status,
     SelfTest,
 }
 
@@ -11,6 +12,7 @@ impl From<ViewMode> for u8 {
     fn from(mode: ViewMode) -> Self {
         match mode {
             ViewMode::Pet => 3,
+            ViewMode::Status => 1,
             ViewMode::SelfTest => 2,
         }
     }
@@ -32,7 +34,8 @@ impl TryFrom<u8> for ViewMode {
 
     fn try_from(val: u8) -> Result<Self, Self::Error> {
         match val {
-            0 | 1 | 3 => Ok(ViewMode::Pet), // Legacy mode tags open the pet view
+            0 | 3 => Ok(ViewMode::Pet),
+            1 => Ok(ViewMode::Status),
             2 => Ok(ViewMode::SelfTest),
             other => Err(InvalidViewMode(other)),
         }
@@ -40,27 +43,30 @@ impl TryFrom<u8> for ViewMode {
 }
 
 impl ViewMode {
-    /// Navigate to the diagnostic view to the left.
+    /// Navigate to the view to the left.
     pub const fn prev(self) -> Self {
         match self {
             Self::Pet => Self::SelfTest,
-            Self::SelfTest => Self::Pet,
+            Self::Status => Self::Pet,
+            Self::SelfTest => Self::Status,
         }
     }
 
-    /// Navigate to the pet view to the right.
+    /// Navigate to the view to the right.
     pub const fn next(self) -> Self {
         match self {
+            Self::Pet => Self::Status,
+            Self::Status => Self::SelfTest,
             Self::SelfTest => Self::Pet,
-            Self::Pet => Self::Pet,
         }
     }
 
     /// Return the next view mode in circular sequence.
     pub const fn cycle(self) -> Self {
         match self {
+            Self::Pet => Self::Status,
+            Self::Status => Self::SelfTest,
             Self::SelfTest => Self::Pet,
-            Self::Pet => Self::SelfTest,
         }
     }
 }

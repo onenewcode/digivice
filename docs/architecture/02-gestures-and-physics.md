@@ -70,15 +70,15 @@ stateDiagram-v2
 ## 3. 倾斜与反扣状态机（Tilt & FaceDown）
 
 ### 3.1 左右倾斜滞后锁定（Tilt Hysteresis）
-当用户左右偏转设备（如左右摇摆切换数码兽与工程自检视图）时，采用带滞后回差的双门限比较器：
+当用户左右偏转设备（触发 BLE 媒体切歌与宠物侧倾回避反应）时，采用带滞后回差的双门限比较器：
 - **人体工学轻触门限**：横滚角 $|\text{Roll}| > 18^\circ$（俯仰角放宽至 $< 50^\circ$），且仅需保持 $\ge 60\text{ms}$：
   - $\text{Roll} < -18^\circ \rightarrow$ 触发左倾斜并进入 `LockedLeft`。
   - $\text{Roll} > +18^\circ \rightarrow$ 触发右倾斜并进入 `LockedRight`。
 - **恢复居中门限**：回正至 $|\text{Roll}| < 8^\circ$ 解除锁定，保持防抖回差的同时消除手势顿挫。
 
 ### 3.2 屏幕朝下扣放（FaceDown DND）
-- **进入免打扰**：当过滤后的重力分量 $G_z < -650\text{mg}$（屏幕朝下反扣在桌面），并稳定保持 $\ge 200\text{ms}$ 时，触发进入反扣状态。UI 立即关闭屏幕背光（0% 亮度），本地专注和宠物状态进入睡眠策略。
-- **退出免打扰**：当设备被翻转拾起至 $G_z > 400\text{mg}$，并稳定 $\ge 100\text{ms}$ 时，触发退出反扣状态，屏幕与本地专注/宠物状态恢复。
+- **进入免打扰**：当过滤后的重力分量 $G_z < -650\text{mg}$（屏幕朝下反扣在桌面），并稳定保持 $\ge 200\text{ms}$ 时，触发进入反扣状态。UI 立即关闭屏幕背光（0% 亮度），宠物进入深度睡眠 `SleepingZzz`。
+- **退出免打扰**：当设备被翻转拾起至 $G_z > 400\text{mg}$，并稳定 $\ge 100\text{ms}$ 时，触发退出反扣状态，恢复背光，宠物触发 `StretchAndYawn` 苏醒。
 
 ### 3.3 侧向倾斜直接跟随与抬起姿态恒正原则（Lateral Tilt & Pitch-Invariance）
 为了实现“抬起不改变，同时往哪一侧倾斜就向那一侧”的人机工学物理交互，`DefaultPet` 与 `InertialTransform` 确立了如下姿态解算规则：
@@ -126,16 +126,13 @@ $$\text{Base}_{k} = \text{Base}_{k-1} + \frac{A_k \ll 8 - \text{Base}_{k-1}}{128
 
 ---
 
-## 5. 硬件引脚隔离与纯手势交互原则（GPIO9 Strapping Pin）
+## 5. 硬件引脚隔离与辅助按键交互（GPIO9 Strapping Pin）
 
 板载侧边按键为 ESP32-C6 的 **BOOT / Strapping 引脚（GPIO9）**：
 
 - **硬件职责隔离**：
-  根据硬件规格书说明，GPIO9 在芯片复位期间决定芯片是否进入 ROM 串口下载模式。若在运行期间将其作为交互功能键使用，不仅存在电气竞争风险，且桌面圆形硬件形态下按键不易触达。
-- **免按键纯手势驱动交互（Touchless Physical Gestures）**：
-  固件将 GPIO9 完全从业务交互与手势事件通道（`GESTURE_CHANNEL`）中解耦，禁止将 BOOT 键作为功能键使用：
-  - **视图导航**：完全由机身左右倾斜手势（`TiltLeft` / `TiltRight`）驱动，在工程自检页与数码暴龙机主视图之间丝滑巡航；
-  - **任务审批与交互**：完全由机身双击轻敲（`DoubleTap`）驱动；
-  - **免打扰控制**：完全由屏幕反扣（`FaceDown` / `FaceUp`）驱动。
-- **硬件诊断透传**：
-  `PowerKeyMonitor` 仅在低频采样中被动读取 GPIO9 电气电平，仅供工程自检页面（`SelfTestView`）显示引脚通断诊断状态（`BOOT:PRSD / REL`），不参与任何业务逻辑判定。
+  根据硬件规格书说明，GPIO9 在芯片复位期间决定芯片是否进入 ROM 串口下载模式。在桌面圆形硬件形态下，设备日常以手势交互为主（敲击、摇晃、倾斜、反扣）。
+- **辅助硬件按键与视图轮播**：
+  `PowerKeyMonitor` 在 200ms 低频安全采样中监测 GPIO9 电平，并在 `AppStateMachine` 中响应按键触发：
+  - **按下（Pressed）**：在 `ViewMode::Pet`、`ViewMode::Status` 与 `ViewMode::SelfTest` 三者间循环轮播视图；
+  - **硬件自检透传**：在工程自检界面（`SelfTestView`）实时呈现通断状态（`BOOT:PRSD / REL`）。
