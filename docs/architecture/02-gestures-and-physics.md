@@ -132,7 +132,7 @@ $$\text{Base}_{k} = \text{Base}_{k-1} + \frac{A_k \ll 8 - \text{Base}_{k-1}}{128
 
 - **硬件职责隔离**：
   根据硬件规格书说明，GPIO9 在芯片复位期间决定芯片是否进入 ROM 串口下载模式。在桌面圆形硬件形态下，设备日常以手势交互为主（敲击、摇晃、倾斜、反扣）。
-- **辅助硬件按键与视图轮播**：
+- **辅助硬件按键与日常养成导航**：
   `PowerKeyMonitor` 在 200ms 低频安全采样中监测 GPIO9 电平，并在 `AppStateMachine` 中响应按键触发：
-  - **按下（Pressed）**：在 `ViewMode::Pet`、`ViewMode::Status` 与 `ViewMode::SelfTest` 三者间循环轮播视图；
+  - **按下（Pressed）**：聚焦日常养成，在 `ViewMode::Pet`（桌面主视窗）与 `ViewMode::Status`（数码宝贝全档案卡）之间双向直切，杜绝日常把玩被底层自检数据打扰；
   - **硬件自检透传**：在工程自检界面（`SelfTestView`）实时呈现通断状态（`BOOT:PRSD / REL`）。

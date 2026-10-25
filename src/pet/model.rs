@@ -4,7 +4,9 @@
 //! snapshot. Keeping the frame outside `ui` lets users replace the pet behavior without
 //! rewriting the application coordinator or hardware drivers.
 
-use super::species::{ActionPhase, PetAction, PetSpecies, SleepState};
+use super::species::{
+    ActionPhase, AttentionState, HealthStatus, PetAction, PetSpecies, SleepState,
+};
 use super::transition::SquashStretch;
 use crate::domain::ChargeState;
 
@@ -60,6 +62,14 @@ pub struct PetAnimationState {
     pub affinity: u16,
     pub wander_x: i8,
     pub training_shakes: u8,
+
+    // Canonical Digivice Nurture Metrics (strongly typed domain states)
+    pub weight_g: u8,
+    pub health: HealthStatus,
+    pub attention: AttentionState,
+    pub care_mistakes: u8,
+    pub training_count: u16,
+    pub age_days: u8,
 }
 
 impl PetAnimationState {
@@ -71,6 +81,16 @@ impl PetAnimationState {
     #[inline]
     pub fn is_charging(&self) -> bool {
         self.charge_state.is_charging()
+    }
+
+    #[inline]
+    pub fn is_sick(&self) -> bool {
+        self.health.is_sick()
+    }
+
+    #[inline]
+    pub fn is_calling(&self) -> bool {
+        self.attention.is_calling()
     }
 }
 
@@ -99,6 +119,12 @@ impl Default for PetAnimationState {
             affinity: 0,
             wander_x: 0,
             training_shakes: 0,
+            weight_g: 5, // Default Koromon base weight
+            health: HealthStatus::Healthy,
+            attention: AttentionState::Idle,
+            care_mistakes: 0,
+            training_count: 0,
+            age_days: 1,
         }
     }
 }
@@ -130,6 +156,14 @@ pub struct PetFrame {
     pub affinity: u16,
     pub wander_x: i8,
     pub training_shakes: u8,
+
+    // Canonical Digivice Nurture Metrics
+    pub weight_g: u8,
+    pub health: HealthStatus,
+    pub attention: AttentionState,
+    pub care_mistakes: u8,
+    pub training_count: u16,
+    pub age_days: u8,
 }
 
 impl PetFrame {
@@ -141,6 +175,16 @@ impl PetFrame {
     #[inline]
     pub fn is_charging(&self) -> bool {
         self.charge_state.is_charging()
+    }
+
+    #[inline]
+    pub fn is_sick(&self) -> bool {
+        self.health.is_sick()
+    }
+
+    #[inline]
+    pub fn is_calling(&self) -> bool {
+        self.attention.is_calling()
     }
 }
 
@@ -169,6 +213,12 @@ impl From<PetAnimationState> for PetFrame {
             affinity: state.affinity,
             wander_x: state.wander_x,
             training_shakes: state.training_shakes,
+            weight_g: state.weight_g,
+            health: state.health,
+            attention: state.attention,
+            care_mistakes: state.care_mistakes,
+            training_count: state.training_count,
+            age_days: state.age_days,
         }
     }
 }

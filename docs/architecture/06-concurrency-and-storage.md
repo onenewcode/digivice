@@ -120,7 +120,7 @@ FaceDown/Sleep > 用户手势 > MusicScene > IdleAnimation
 | `44` | `pet_care_mistakes` | `u8` | 呼叫失误与照料过失计数 |
 | `45` | `pet_training_count` | `u8` | 钟摆摇摇乐蓄力训练总次数 |
 | `46` | `pet_evolution_stage`| `u8` | 进化形态阶段 (0: Koromon .. 5: Omegamon) |
-| `47` | `_reserved` | `[u8; 1]` | 字节对齐保留位 |
+| `47` | `pet_weight_g` | `u8` | 数码兽真实体重 (克，基准 5..50g，吃肉+1g，胶囊+2g，特训-1g) |
 | `48..52` | `commit_marker` | `u32` (LE) | 两阶段提交标志 `0x434F_4D4D` ("COMM") |
 
 `StorageManager::load_config` 启动时读取 A/B 两个扇区，验证 Magic、版本、长度、CRC 和提交标记，选择回绕安全的最大 `seq`。若遇旧版 V1 记录则自动兼容迁移；若两个扇区都无效，则安全回退至 `DeviceConfig::default()`。

@@ -97,6 +97,27 @@ impl PetSpecies {
     pub const fn has_next_evolution(&self) -> bool {
         !matches!(self, Self::Omegamon)
     }
+
+    /// Base standard weight in grams for the species.
+    #[inline]
+    pub const fn base_weight_g(&self) -> u8 {
+        match self {
+            Self::Koromon => 5,
+            Self::Agumon => 10,
+            Self::Greymon => 20,
+            Self::MetalGreymon => 30,
+            Self::WarGreymon => 40,
+            Self::Omegamon => 50,
+        }
+    }
+}
+
+/// Nurturing food item categories: Roast Meat (Hunger) vs. Super Vitamin Protein Pill (Strength).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FoodType {
+    #[default]
+    Meat,
+    Pill,
 }
 
 /// Three-phase lifecycle for every composite action.
@@ -121,6 +142,36 @@ impl SleepState {
     #[inline]
     pub fn is_sleeping(&self) -> bool {
         matches!(self, Self::Asleep)
+    }
+}
+
+/// Strongly-typed pet physical health status eliminating boolean blindness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HealthStatus {
+    #[default]
+    Healthy,
+    Sick,
+}
+
+impl HealthStatus {
+    #[inline]
+    pub const fn is_sick(&self) -> bool {
+        matches!(self, Self::Sick)
+    }
+}
+
+/// Strongly-typed call for attention indicator state eliminating boolean blindness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AttentionState {
+    #[default]
+    Idle,
+    Calling,
+}
+
+impl AttentionState {
+    #[inline]
+    pub const fn is_calling(&self) -> bool {
+        matches!(self, Self::Calling)
     }
 }
 
@@ -165,11 +216,18 @@ pub enum PetAction {
 
     // 2. Interaction & Feeding
     HappyHop,
-    NoticeFood,
+    NoticeFood(FoodType),
     EatingChew {
+        food_type: FoodType,
         chew_frame: u8,
     },
     SatisfiedGulp,
+    FlushClean {
+        tick: u8,
+    },
+    HealCure {
+        tick: u8,
+    },
 
     // 3. Battle Training & Victory
     TrainingHop {

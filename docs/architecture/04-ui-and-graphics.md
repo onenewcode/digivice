@@ -146,18 +146,17 @@ ui_render_task (30ms 等时定频节拍 ~33.3 FPS)
 stateDiagram-v2
     [*] --> Pet: 默认上电
     Pet --> Status: BOOT 按键短按
-    Status --> SelfTest: BOOT 按键短按
-    SelfTest --> Pet: BOOT 按键短按
+    Status --> Pet: BOOT 按键短按
     Pet --> Sleep: FaceDown
     Sleep --> Pet: FaceUp
     Status --> Sleep: FaceDown
     Sleep --> Status: FaceUp
 ```
 
-- **Pet**：默认且核心的日常主视图，展示软萌数码兽漫步、表情交互、钟摆特训蓄力计量槽与音乐律动；
-- **Status**：经典数码暴龙卡片状态视窗，展示物种名、进化阶位勋章、48x48 点阵立绘、饥饿/力量体征格、能量/亲密度、供电电压与 BLE 在席状态；
-- **SelfTest**：工厂底层工程级硬件诊断，显示 6-DOF IMU 原始值、RTC 寄存器、分压 ADC 毫伏与系统事件；
-- **Sleep**：低功耗免打扰，背光即刻切至 0%，停止屏幕刷新与高频计算。
+- **Pet**：默认且核心的日常主视图，展示软萌数码兽漫步、表情交互、双重喂食（肉 🍖 / 胶囊 💊）、冲水打扫水浪特效、右上角呼叫闪烁提示灯（⚠️）、钟摆特训蓄力计量槽与音乐律动；
+- **Status**：经典数码暴龙卡片状态视窗，展示物种名、进化阶位勋章、48x48 点阵立绘、真实年龄（AGE）与体重（WT: Xg）、饥饿/力量体征格、特训次数/失误记录（TRAIN / ERR）、能量/亲密度、供电电压与 BLE 在席状态；
+- **Sleep**：低功耗免打扰，背光即刻切至 0%，停止屏幕刷新与高频计算；
+- **独立硬件自检诊断（SelfTest Bin）**：出厂硬件诊断与工装测试已完全解耦并迁入独立目标 `src/bin/selftest.rs`，生产桌宠固件纯净零负担。
 
 按键交互对齐：
-- **短按 BOOT 按键**：在 `Pet -> Status -> SelfTest -> Pet` 之间循环轮播切换视图。
+- **短按 BOOT 按键**：在 `Pet`（桌宠主视图）与 `Status`（数码宝贝全档案卡）之间双向直切，日常把玩沉浸专注。

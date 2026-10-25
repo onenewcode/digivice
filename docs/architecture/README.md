@@ -74,7 +74,8 @@ digivice/
 ├── docs/architecture/          # 与实现同步的架构规范
 ├── src/
 │   ├── bin/
-│   │   └── main.rs             # 纯组合根 (~120行)：初始化硬件、堆、板卡、BLE栈并启动并发任务
+│   │   ├── digivice.rs         # 正统桌面数码兽产品组合根：初始化硬件、堆、板卡、BLE栈并启动并发任务
+│   │   └── selftest.rs         # 独立工厂硬件自检诊断工具：全外设检验与实时遥测视窗
 │   ├── app/                    # 本地应用状态协调与工作流 (AppStateMachine, ConfigState)
 │   ├── board/                  # LCD、IMU、RTC、电源与硬件引脚隔离 (BSP)
 │   ├── domain/                 # 核心跨层抽象领域模型 (ViewMode, DeviceOrientation, MusicScene, HidAction)

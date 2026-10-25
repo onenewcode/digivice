@@ -4,7 +4,8 @@
 //! music rhythm synchronization, Zero-FPU IMU attitude balance, and circadian metabolism.
 
 use super::species::{
-    ActionPhase, LookDirection, MusicDanceStyle, PetAction, PetSpecies, SleepState, StepLeg,
+    ActionPhase, AttentionState, FoodType, HealthStatus, LookDirection, MusicDanceStyle, PetAction,
+    PetSpecies, SleepState, StepLeg,
 };
 use super::transition::{InertialTransform, SPRING_SQUASH_LUT, SquashStretch};
 use super::{PetAnimationState, PetBehavior, PetEvent, PetFrame, PetMood, PupilShape};
@@ -49,6 +50,12 @@ pub struct DefaultPet {
     wander_pause_ticks: u16,
     wander_step_phase: u8,
     wander_peek_timer: u16,
+
+    // Canonical Digivice nurture timers
+    starve_ticks: u16,
+    uncleaned_poop_ticks: u16,
+    call_attention_ticks: u16,
+    last_circadian_hour: Option<u8>,
 }
 
 impl Default for DefaultPet {
@@ -67,8 +74,20 @@ impl DefaultPet {
         Self::with_stats_and_species(hunger, strength, PetSpecies::Koromon)
     }
 
-    /// Initialize Digimon with persistent hunger, strength stats, and species evolution stage.
-    pub fn with_stats_and_species(hunger: u8, strength: u8, species: PetSpecies) -> Self {
+    /// Initialize Digimon with full canonical nurture stats.
+    pub fn with_full_stats(
+        hunger: u8,
+        strength: u8,
+        species: PetSpecies,
+        weight_g: u8,
+        care_mistakes: u8,
+        training_count: u16,
+    ) -> Self {
+        let actual_weight = if weight_g == 0 {
+            species.base_weight_g()
+        } else {
+            weight_g
+        };
         Self {
             animation: PetAnimationState {
                 species,
@@ -93,6 +112,12 @@ impl DefaultPet {
                 energy: 100,
                 affinity: 0,
                 training_shakes: 0,
+                weight_g: actual_weight,
+                health: HealthStatus::Healthy,
+                attention: AttentionState::Idle,
+                care_mistakes,
+                training_count,
+                age_days: 1,
             },
             inertial_transform: InertialTransform::new(),
             blink_tick: 0,
@@ -115,7 +140,17 @@ impl DefaultPet {
             wander_pause_ticks: 90,
             wander_step_phase: 0,
             wander_peek_timer: 0,
+
+            starve_ticks: 0,
+            uncleaned_poop_ticks: 0,
+            call_attention_ticks: 0,
+            last_circadian_hour: None,
         }
+    }
+
+    /// Initialize Digimon with persistent hunger, strength stats, and species evolution stage.
+    pub fn with_stats_and_species(hunger: u8, strength: u8, species: PetSpecies) -> Self {
+        Self::with_full_stats(hunger, strength, species, species.base_weight_g(), 0, 0)
     }
 
     #[inline]
@@ -126,6 +161,26 @@ impl DefaultPet {
     #[inline]
     pub fn strength(&self) -> u8 {
         self.animation.strength
+    }
+
+    #[inline]
+    pub fn weight_g(&self) -> u8 {
+        self.animation.weight_g
+    }
+
+    #[inline]
+    pub fn is_sick(&self) -> bool {
+        self.animation.is_sick()
+    }
+
+    #[inline]
+    pub fn care_mistakes(&self) -> u8 {
+        self.animation.care_mistakes
+    }
+
+    #[inline]
+    pub fn training_count(&self) -> u16 {
+        self.animation.training_count
     }
 
     #[inline]
@@ -168,6 +223,14 @@ impl DefaultPet {
 
     /// Process RTC circadian rhythm (Koromon sleeps at night between 22:00 and 07:00).
     pub fn on_circadian_hour(&mut self, hour: u8) {
+        if let Some(prev_hour) = self.last_circadian_hour
+            && prev_hour != hour
+            && hour == 0
+        {
+            self.animation.age_days = self.animation.age_days.saturating_add(1);
+        }
+        self.last_circadian_hour = Some(hour);
+
         let is_night = !(7..22).contains(&hour);
         if is_night && !self.animation.sleep_state.is_sleeping() {
             self.on_face_down();
@@ -176,13 +239,15 @@ impl DefaultPet {
         }
     }
 
-    /// Check if current action is uninterruptible (e.g. eating, attacking, or evolving sequence)
+    /// Check if current action is uninterruptible (e.g. eating, attacking, cleaning, or evolving sequence)
     fn is_current_uninterruptible(&self) -> bool {
         matches!(
             self.animation.action,
-            PetAction::NoticeFood
+            PetAction::NoticeFood(_)
                 | PetAction::EatingChew { .. }
                 | PetAction::SatisfiedGulp
+                | PetAction::FlushClean { .. }
+                | PetAction::HealCure { .. }
                 | PetAction::AttackSpecial { .. }
                 | PetAction::Evolving { .. }
         )
@@ -207,10 +272,60 @@ impl DefaultPet {
         self.squash_step = Some(0); // Trigger elastic anticipation
     }
 
-    /// Handle single tap (patting / affectionate greeting)
+    /// Cure pet sickness via affectionate care / first aid
+    pub fn on_heal(&mut self, now: Instant) {
+        if self.animation.sleep_state.is_sleeping() {
+            return;
+        }
+
+        self.animation.health = HealthStatus::Healthy;
+        self.starve_ticks = 0;
+        self.uncleaned_poop_ticks = 0;
+        self.animation.mood = PetMood::Happy;
+        self.animation.pupil_shape = PupilShape::Heart;
+        self.animation.affinity = self.animation.affinity.saturating_add(15);
+        self.reaction_timer = Some(now);
+
+        println!(
+            "Healed sickness for {}! Health restored.",
+            self.animation.species.name()
+        );
+        self.trigger_action(PetAction::HealCure { tick: 0 }, 24);
+    }
+
+    /// Flush and clean all accumulated poop from desk with water wave
+    pub fn on_flush(&mut self, now: Instant) {
+        if self.animation.sleep_state.is_sleeping() {
+            return;
+        }
+
+        if self.animation.poop_count == 0 {
+            return;
+        }
+
+        self.animation.poop_count = 0;
+        self.uncleaned_poop_ticks = 0;
+        self.animation.mood = PetMood::Happy;
+        self.animation.pupil_shape = PupilShape::Heart;
+        self.animation.affinity = self.animation.affinity.saturating_add(10);
+        self.reaction_timer = Some(now);
+
+        println!(
+            "Toilet Flush: Desk cleaned for {}!",
+            self.animation.species.name()
+        );
+        self.trigger_action(PetAction::FlushClean { tick: 0 }, 20);
+    }
+
+    /// Handle single tap (patting / affectionate greeting or curing sickness)
     pub fn on_tap(&mut self, now: Instant) {
         if self.animation.sleep_state.is_sleeping() {
             self.on_face_up();
+            return;
+        }
+
+        if self.animation.is_sick() {
+            self.on_heal(now);
             return;
         }
 
@@ -241,11 +356,18 @@ impl DefaultPet {
     }
 
     /// Handle double tap:
-    /// - If hungry (hunger < 4): Feed Roast Meat, clean mess, and boost energy.
-    /// - If already full (hunger >= 4): Unleash Signature Special Attack!
+    /// - If sick: Heal sickness!
+    /// - If hungry (hunger < 4): Feed Roast Meat (🍖), Hunger +1, Weight +1g, Energy +20.
+    /// - If hunger == 4 && strength < 4: Feed Super Vitamin Protein Pill (💊), Strength +1, Weight +2g, Energy +30.
+    /// - If both full (4/4): Unleash Signature Special Attack!
     pub fn on_double_tap(&mut self, now: Instant) {
         if self.animation.sleep_state.is_sleeping() {
             self.on_face_up();
+            return;
+        }
+
+        if self.animation.is_sick() {
+            self.on_heal(now);
             return;
         }
 
@@ -253,13 +375,34 @@ impl DefaultPet {
             self.animation.mood = PetMood::Happy;
             self.animation.pupil_shape = PupilShape::Star;
             self.animation.hunger = self.animation.hunger.saturating_add(1).min(4);
+            self.animation.weight_g = self.animation.weight_g.saturating_add(1);
             self.animation.energy = self.animation.energy.saturating_add(20).min(100);
             self.animation.affinity = self.animation.affinity.saturating_add(10);
-            // Feeding also cleans up any accumulated mess
-            self.animation.poop_count = self.animation.poop_count.saturating_sub(1);
             self.reaction_timer = Some(now);
 
-            self.trigger_action(PetAction::NoticeFood, 10);
+            println!(
+                "Feeding Roast Meat to {}! Hunger: {}/4, Weight: {}g",
+                self.animation.species.name(),
+                self.animation.hunger,
+                self.animation.weight_g
+            );
+            self.trigger_action(PetAction::NoticeFood(FoodType::Meat), 10);
+        } else if self.animation.strength < 4 {
+            self.animation.mood = PetMood::Focused;
+            self.animation.pupil_shape = PupilShape::Star;
+            self.animation.strength = self.animation.strength.saturating_add(1).min(4);
+            self.animation.weight_g = self.animation.weight_g.saturating_add(2);
+            self.animation.energy = self.animation.energy.saturating_add(30).min(100);
+            self.animation.affinity = self.animation.affinity.saturating_add(15);
+            self.reaction_timer = Some(now);
+
+            println!(
+                "Feeding Super Vitamin Pill to {}! Power: {}/4, Weight: {}g",
+                self.animation.species.name(),
+                self.animation.strength,
+                self.animation.weight_g
+            );
+            self.trigger_action(PetAction::NoticeFood(FoodType::Pill), 10);
         } else {
             self.on_attack(now);
         }
@@ -267,7 +410,7 @@ impl DefaultPet {
 
     /// Handle shake / Pendulum Shake training
     pub fn on_shake(&mut self, now: Instant) {
-        if self.animation.sleep_state.is_sleeping() {
+        if self.animation.sleep_state.is_sleeping() || self.animation.is_sick() {
             return;
         }
 
@@ -284,9 +427,18 @@ impl DefaultPet {
         if self.shake_count >= PENDULUM_SHAKE_EVOLUTION_QUOTA {
             self.shake_count = 0;
             self.animation.training_shakes = 0;
+            self.animation.training_count = self.animation.training_count.saturating_add(1);
             self.animation.mood = PetMood::Happy;
             self.animation.strength = 4;
             self.animation.energy = 100;
+            // Training burns 1g weight, but cannot drop below species base weight
+            let base_wt = self.animation.species.base_weight_g();
+            self.animation.weight_g = self.animation.weight_g.saturating_sub(1).max(base_wt);
+
+            println!(
+                "Pendulum Training Set #{} complete! Strength: 4/4, Weight: {}g",
+                self.animation.training_count, self.animation.weight_g
+            );
 
             if self.animation.species.has_next_evolution() {
                 println!(
@@ -438,6 +590,10 @@ impl DefaultPet {
     }
 
     /// Advance action state machine and render frame.
+    #[allow(
+        clippy::large_stack_frames,
+        reason = "Authoritative animation state machine step and lifecycle progression"
+    )]
     fn tick_frame(&mut self, now: Instant) -> PetFrame {
         self.animation.anim_tick = self.animation.anim_tick.wrapping_add(1);
         self.metabolic_tick = self.metabolic_tick.wrapping_add(1);
@@ -450,6 +606,53 @@ impl DefaultPet {
             if self.animation.hunger <= 1 && self.animation.poop_count < 4 {
                 self.animation.poop_count += 1;
             }
+        }
+
+        // Track sickness conditions: prolonged starvation or accumulated poop
+        if self.animation.hunger == 0 && !self.animation.sleep_state.is_sleeping() {
+            self.starve_ticks = self.starve_ticks.saturating_add(1);
+        } else {
+            self.starve_ticks = 0;
+        }
+
+        if self.animation.poop_count >= 3 && !self.animation.sleep_state.is_sleeping() {
+            self.uncleaned_poop_ticks = self.uncleaned_poop_ticks.saturating_add(1);
+        } else {
+            self.uncleaned_poop_ticks = 0;
+        }
+
+        if (self.starve_ticks >= 1800 || self.uncleaned_poop_ticks >= 1200)
+            && !self.animation.is_sick()
+            && !self.animation.sleep_state.is_sleeping()
+        {
+            self.animation.health = HealthStatus::Sick;
+            self.animation.mood = PetMood::Dizzy;
+            self.animation.pupil_shape = PupilShape::Dizzy;
+            println!("Pet fell sick due to neglect/mess! Sickness triggered.");
+        }
+
+        // Call for Attention: active when starving, messy, or sick
+        let needs_attention =
+            self.animation.hunger == 0 || self.animation.poop_count > 0 || self.animation.is_sick();
+        self.animation.attention = if needs_attention {
+            AttentionState::Calling
+        } else {
+            AttentionState::Idle
+        };
+
+        if needs_attention && !self.animation.sleep_state.is_sleeping() {
+            self.call_attention_ticks = self.call_attention_ticks.saturating_add(1);
+            // ~3 minutes (5400 ticks at 30 FPS) of unanswered call = 1 Care Mistake
+            if self.call_attention_ticks >= 5400 {
+                self.call_attention_ticks = 0;
+                self.animation.care_mistakes = self.animation.care_mistakes.saturating_add(1);
+                println!(
+                    "Unattended call: Care Mistake logged! Total: {}",
+                    self.animation.care_mistakes
+                );
+            }
+        } else {
+            self.call_attention_ticks = 0;
         }
 
         // 2. Clear temporary user reaction timers (after 3 seconds)
@@ -527,13 +730,21 @@ impl DefaultPet {
                 }
             }
             ActionPhase::Loop => {
-                if let PetAction::EatingChew { chew_frame } = &mut self.animation.action
+                if let PetAction::EatingChew { chew_frame, .. } = &mut self.animation.action
                     && self.action_tick.is_multiple_of(4)
                 {
                     *chew_frame ^= 1;
                 }
 
                 if let PetAction::AttackSpecial { tick } = &mut self.animation.action {
+                    *tick = tick.saturating_add(1);
+                }
+
+                if let PetAction::FlushClean { tick } = &mut self.animation.action {
+                    *tick = tick.saturating_add(1);
+                }
+
+                if let PetAction::HealCure { tick } = &mut self.animation.action {
                     *tick = tick.saturating_add(1);
                 }
 
@@ -547,6 +758,8 @@ impl DefaultPet {
                     if *progress_pct >= 100 {
                         let new_species = *target_species;
                         self.animation.species = new_species;
+                        self.animation.weight_g =
+                            self.animation.weight_g.max(new_species.base_weight_g());
                         self.animation.action = PetAction::HappyHop;
                         self.action_phase = ActionPhase::Enter;
                         self.action_tick = 0;
@@ -567,8 +780,11 @@ impl DefaultPet {
             ActionPhase::Exit => {
                 if self.action_tick >= 2 {
                     match self.animation.action {
-                        PetAction::NoticeFood => {
-                            self.animation.action = PetAction::EatingChew { chew_frame: 0 };
+                        PetAction::NoticeFood(food_type) => {
+                            self.animation.action = PetAction::EatingChew {
+                                food_type,
+                                chew_frame: 0,
+                            };
                             self.action_phase = ActionPhase::Enter;
                             self.action_tick = 0;
                             self.action_duration_ticks = 16;
@@ -578,6 +794,14 @@ impl DefaultPet {
                             self.action_phase = ActionPhase::Enter;
                             self.action_tick = 0;
                             self.action_duration_ticks = 8;
+                        }
+                        PetAction::FlushClean { .. } | PetAction::HealCure { .. } => {
+                            self.animation.action = PetAction::HappyHop;
+                            self.action_phase = ActionPhase::Enter;
+                            self.action_tick = 0;
+                            self.action_duration_ticks = 24;
+                            self.animation.mood = PetMood::Happy;
+                            self.animation.pupil_shape = PupilShape::Heart;
                         }
                         _ => {
                             if let Some(next) = self.next_action.take() {
@@ -681,6 +905,7 @@ impl PetBehavior for DefaultPet {
             PetEvent::DoubleTap => self.on_double_tap(now),
             PetEvent::Shake => self.on_shake(now),
             PetEvent::Attack => self.on_attack(now),
+            PetEvent::Flush => self.on_flush(now),
             PetEvent::FaceDown => self.on_face_down(),
             PetEvent::FaceUp => self.on_face_up(),
             PetEvent::MusicScene(scene) => self.on_music_scene(scene, now),

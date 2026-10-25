@@ -26,7 +26,7 @@ All AI Agents and human contributors **MUST** review the relevant documentation 
 
 - **Target Chip**: `esp32c6`. All dependencies, HAL features, and peripheral drivers must maintain strict compatibility with this chip.
 - **Environment Constraints**: This is a pure `#![no_std]` and `#![no_main]` bare-metal embedded project. Do not introduce `std`; exclusively use `core` and lightweight embedded crates.
-- **Dynamic Memory**: `alloc` is enabled. The heap is statically configured and initialized in `src/bin/main.rs` via `esp_alloc::heap_allocator!`.
+- **Dynamic Memory**: `alloc` is enabled. The heap is statically configured and initialized in `src/bin/digivice.rs` (and `src/bin/selftest.rs`) via `esp_alloc::heap_allocator!`.
 - **Zero-Warning Redline**: All code must compile cleanly under `#![deny(warnings)]`, `#![deny(clippy::mem_forget)]`, and `#![deny(clippy::large_stack_frames)]`. Always maintain **0 errors, 0 warnings**.
 - **Configuration & Environment**: `.cargo/config.toml` contains target runner configurations, compilation flags, and default environment variables. Espressif crate settings should be managed via environment variables rather than hardcoded in source.
 - **Firmware Flashing**: Uses `espflash` (configured in `.cargo/config.toml`) over the board's native Type-C port (USB-Serial-JTAG). No external hardware probes (such as J-Link or DAPLink) are required. See [`docs/flashing.md`](docs/flashing.md) for detailed commands.

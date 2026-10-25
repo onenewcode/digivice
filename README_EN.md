@@ -76,7 +76,8 @@ The project is structured according to clean Board Support Package (BSP) decoupl
 ```
 src/
 ├── bin/
-│   └── main.rs                  # Embassy runtime entry point and task spawning
+│   ├── digivice.rs              # Cyberpet runtime entry point and task spawning
+│   └── selftest.rs              # Dedicated factory hardware self-test diagnostic tool
 ├── bsp/                         # Waveshare ESP32-C6-LCD-1.28 hardware abstraction
 │   ├── display.rs               # GC9A01 SPI driver & backlight controller
 │   ├── imu.rs                   # QMI8658 6-DOF driver & interrupt handling

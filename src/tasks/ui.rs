@@ -8,7 +8,6 @@ use crate::board::display::{Backlight, BandDisplay};
 use crate::domain::ViewMode;
 use crate::ipc::UI_STATE_SIGNAL;
 use crate::ui::pet_view::{pet_dirty_y_bounds, render_pet};
-use crate::ui::selftest_view::render_selftest;
 use crate::ui::status_view::render_status;
 use crate::ui::{COLOR_BG, UiState};
 
@@ -65,13 +64,6 @@ pub async fn ui_render_task(
             }
 
             let render_result = match mode {
-                ViewMode::SelfTest => {
-                    last_mode = Some(ViewMode::SelfTest);
-                    prev_dirty_y = (0, 239);
-                    display.render_full_frame(COLOR_BG, |target| {
-                        render_selftest(target, &ui_state);
-                    })
-                }
                 ViewMode::Status => {
                     last_mode = Some(ViewMode::Status);
                     prev_dirty_y = (0, 239);

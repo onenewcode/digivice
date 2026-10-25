@@ -97,47 +97,55 @@ fn render_status_portrait(target: &mut BandTarget, state: &UiState) {
 fn render_status_telemetry(target: &mut BandTarget, state: &UiState) {
     let mut line_buf = String::<36>::new();
 
-    // Line 1: Hunger & Strength Meters (Y: 114)
+    // Line 1: Age & Weight (Y: 108)
+    let _ = write!(
+        line_buf,
+        "AGE:{}d       WT:{}g",
+        state.pet.age_days, state.pet.weight_g
+    );
+    draw_label(target, &line_buf, Point::new(36, 108), COLOR_CYAN);
+
+    // Line 2: Hunger & Strength Meters (Y: 122)
+    line_buf.clear();
     let _ = write!(
         line_buf,
         "HUNGER:{}/4   PWR:{}/4",
         state.pet.hunger, state.pet.strength
     );
-    draw_label(target, &line_buf, Point::new(36, 114), COLOR_WHITE);
+    draw_label(target, &line_buf, Point::new(36, 122), COLOR_WHITE);
 
-    // Line 2: Energy & Affinity (Y: 130)
+    // Line 3: Training Sessions & Care Mistakes (Y: 136)
+    line_buf.clear();
+    let _ = write!(
+        line_buf,
+        "TRAIN:{}     ERR:{}",
+        state.pet.training_count, state.pet.care_mistakes
+    );
+    draw_label(target, &line_buf, Point::new(36, 136), COLOR_AMBER);
+
+    // Line 4: Energy & Affinity (Y: 150)
     line_buf.clear();
     let _ = write!(
         line_buf,
         "ENERGY:{}%   AFF:{}",
         state.pet.energy, state.pet.affinity
     );
-    draw_label(target, &line_buf, Point::new(36, 130), COLOR_WHITE);
+    draw_label(target, &line_buf, Point::new(36, 150), COLOR_WHITE);
 
-    // Line 3: Battery Rail & Presence Link (Y: 146)
+    // Line 5: Battery Rail & Presence Link (Y: 164)
     line_buf.clear();
     let pres_str = match state.presence {
         PresenceState::Near => "NEAR",
         PresenceState::Away => "AWAY",
     };
     let _ = write!(line_buf, "BAT:{}mV BLE:{}", state.v_rail_mv, pres_str);
-    draw_label(target, &line_buf, Point::new(36, 146), COLOR_GREEN);
-
-    // Line 4: Shake Training & Last Gesture (Y: 162)
-    line_buf.clear();
-    let evt = state.last_gesture.map(|g| g.name()).unwrap_or("Ready");
-    let _ = write!(
-        line_buf,
-        "SHAKE:{}/10 EVT:{}",
-        state.pet.training_shakes, evt
-    );
-    draw_label(target, &line_buf, Point::new(36, 162), COLOR_AMBER);
+    draw_label(target, &line_buf, Point::new(36, 164), COLOR_GREEN);
 
     // Navigation Footer Hint (Y: 188)
     draw_label(
         target,
-        "[BOOT: CYCLE VIEW]",
-        Point::new(68, 188),
+        "[BOOT: PET VIEW]",
+        Point::new(72, 188),
         COLOR_DARK_GRAY,
     );
 }

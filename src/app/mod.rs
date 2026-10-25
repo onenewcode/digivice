@@ -52,7 +52,14 @@ impl AppStateMachine<DefaultPet> {
         let species = crate::pet::PetSpecies::from_stage(config.pet_evolution_stage);
         Self::with_pet(
             config,
-            DefaultPet::with_stats_and_species(config.pet_hunger, config.pet_strength, species),
+            DefaultPet::with_full_stats(
+                config.pet_hunger,
+                config.pet_strength,
+                species,
+                config.pet_weight_g,
+                config.pet_care_mistakes,
+                config.pet_training_count as u16,
+            ),
         )
     }
 }
@@ -148,7 +155,7 @@ impl<P: PetBehavior> AppStateMachine<P> {
             GestureEvent::SingleTap => {
                 let now = Instant::now();
                 self.pet.handle(PetEvent::Tap, now);
-                println!("Gesture SingleTap -> Pet Mascot & Play/Pause");
+                println!("Gesture SingleTap -> Pet Mascot / Heal & PlayPause");
                 if HID_ACTION_CHANNEL.try_send(HidAction::PlayPause).is_err() {
                     println!("WARN: HID_ACTION_CHANNEL full; dropping media action");
                 }
@@ -156,24 +163,31 @@ impl<P: PetBehavior> AppStateMachine<P> {
             }
             GestureEvent::DoubleTap => {
                 let now = Instant::now();
-                if self.state.pet.hunger >= 4 {
-                    self.pet.handle(PetEvent::Attack, now);
-                    println!("Gesture DoubleTap (Full Hunger) -> Special Attack & Next Track");
-                } else {
-                    self.pet.handle(PetEvent::DoubleTap, now);
-                    println!("Gesture DoubleTap -> Feed & Next Track");
-                }
+                self.pet.handle(PetEvent::DoubleTap, now);
+                println!("Gesture DoubleTap -> Feed / Pill / Attack & Next Track");
                 let _ = HID_ACTION_CHANNEL.try_send(HidAction::NextTrack);
                 self.dirty = true;
             }
             GestureEvent::TiltLeft => {
-                println!("Gesture TiltLeft -> Previous Track");
-                let _ = HID_ACTION_CHANNEL.try_send(HidAction::PreviousTrack);
+                if self.state.pet.poop_count > 0 {
+                    let now = Instant::now();
+                    self.pet.handle(PetEvent::Flush, now);
+                    println!("Gesture TiltLeft -> Flush Clean Poop!");
+                } else {
+                    println!("Gesture TiltLeft -> Previous Track");
+                    let _ = HID_ACTION_CHANNEL.try_send(HidAction::PreviousTrack);
+                }
                 self.dirty = true;
             }
             GestureEvent::TiltRight => {
-                println!("Gesture TiltRight -> Next Track");
-                let _ = HID_ACTION_CHANNEL.try_send(HidAction::NextTrack);
+                if self.state.pet.poop_count > 0 {
+                    let now = Instant::now();
+                    self.pet.handle(PetEvent::Flush, now);
+                    println!("Gesture TiltRight -> Flush Clean Poop!");
+                } else {
+                    println!("Gesture TiltRight -> Next Track");
+                    let _ = HID_ACTION_CHANNEL.try_send(HidAction::NextTrack);
+                }
                 self.dirty = true;
             }
             GestureEvent::HeadingUpdate(hdg) => {
@@ -256,6 +270,9 @@ impl<P: PetBehavior> AppStateMachine<P> {
         config.pet_hunger = self.state.pet.hunger;
         config.pet_strength = self.state.pet.strength;
         config.pet_evolution_stage = self.state.pet.species.stage_index();
+        config.pet_weight_g = self.state.pet.weight_g;
+        config.pet_care_mistakes = self.state.pet.care_mistakes;
+        config.pet_training_count = self.state.pet.training_count.min(u8::MAX as u16) as u8;
         config
     }
 
@@ -305,10 +322,7 @@ impl<P: PetBehavior> AppStateMachine<P> {
         self.state.imu_sample = snapshot.sample;
         self.state.heading_deg = snapshot.heading_deg;
         self.state.imu_status = snapshot.imu_status;
-        if self.state.mode == ViewMode::SelfTest
-            || self.state.mode == ViewMode::Pet
-            || self.state.mode == ViewMode::Status
-        {
+        if self.state.mode == ViewMode::Pet || self.state.mode == ViewMode::Status {
             self.dirty = true;
         }
     }

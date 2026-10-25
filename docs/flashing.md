@@ -13,18 +13,24 @@ cargo install espflash --locked          # 命令行工具，烧录已有 ELF
 cargo install cargo-espflash --locked    # cargo 子命令，编译 + 烧录一条命令
 ```
 
-## 烧录
+## 烧录目标 Binary（双 Bin 架构）
+
+本项目遵循严格的生产固件与工厂测试治具解耦原则，提供两个独立可执行目标：
+
+| 目标名称 | 源码入口 | 职责定位 | 烧录命令 |
+| :--- | :--- | :--- | :--- |
+| **`digivice`** | `src/bin/digivice.rs` | **正统桌面数码兽产品固件**（完全剥离测试代码，专注纯粹桌宠养成） | `cargo espflash flash --bin digivice --monitor` |
+| **`selftest`** | `src/bin/selftest.rs` | **工厂硬件自检测试诊断工具**（独立运行，检验屏幕、IMU、RTC、ADC与按键） | `cargo espflash flash --bin selftest --monitor` |
 
 ```sh
-# 自动编译并烧录（推荐）
-cargo espflash flash --chip esp32c6
+# 1. 烧录数码机主固件（默认推荐）
+cargo espflash flash --bin digivice --monitor
 
-# 烧录 release 版本
-cargo espflash flash --release --chip esp32c6
+# 2. 烧录出厂硬件自检测试固件
+cargo espflash flash --bin selftest --monitor
 
-# 或先编译，再用命令行工具烧录 ELF
-cargo build
-espflash flash --chip esp32c6 target/riscv32imac-unknown-none-elf/debug/digivice
+# 烧录 release 优化版本
+cargo espflash flash --release --bin digivice --monitor
 ```
 
 设备端口一般会自动识别，需要时用 `-p /dev/ttyACM0` 指定。

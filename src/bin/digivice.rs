@@ -1,4 +1,4 @@
-//! ESP32-C6 Digivice Firmware Entry Point
+//! ESP32-C6 Digivice Cyberpet Firmware Entry Point
 //!
 //! Serves as the pure composition root: initializes hardware peripherals via the Board Support
 //! Package (BSP), configures the memory heap, loads device settings from flash, instantiates the
@@ -51,7 +51,7 @@ static BLE_HOST_RESOURCES: StaticCell<trouble_host::HostResources<DefaultPacketP
 )]
 #[esp_rtos::main]
 async fn main(spawner: embassy_executor::Spawner) -> ! {
-    println!("Starting ESP32-C6 Digivice...");
+    println!("Starting ESP32-C6 Digivice Cyberpet...");
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);

@@ -6,14 +6,15 @@
 use super::UiState;
 use crate::board::display::{BAND_HEIGHT, BandTarget};
 use crate::pet::assets::{
-    AGUMON_ATTACK_FIRE, AGUMON_BODY_ACTION, AGUMON_BODY_NEUTRAL, DIGIMON_16_PALETTE, FX_HEART,
-    FX_NOTE, GREYMON_ATTACK_MEGA_FLAME, GREYMON_BODY_ACTION, GREYMON_BODY_NEUTRAL, ITEM_POOP,
-    ITEM_ROAST_MEAT, KOROMON_BODY_ACTION, KOROMON_BODY_NEUTRAL, METAL_GREYMON_ATTACK_MISSILES,
+    AGUMON_ATTACK_FIRE, AGUMON_BODY_ACTION, AGUMON_BODY_NEUTRAL, DIGIMON_16_PALETTE, FX_BANDAGE,
+    FX_HEART, FX_NOTE, FX_SKULL, GREYMON_ATTACK_MEGA_FLAME, GREYMON_BODY_ACTION,
+    GREYMON_BODY_NEUTRAL, HUD_CALL_ATTENTION, ITEM_POOP, ITEM_PROTEIN_PILL, ITEM_ROAST_MEAT,
+    KOROMON_BODY_ACTION, KOROMON_BODY_NEUTRAL, METAL_GREYMON_ATTACK_MISSILES,
     METAL_GREYMON_BODY_ACTION, METAL_GREYMON_BODY_NEUTRAL, OMEGAMON_ATTACK_SUPREME_CANNON,
     OMEGAMON_BODY_ACTION, OMEGAMON_BODY_NEUTRAL, PROP_HEADBAND, PROP_HEADPHONES,
     WAR_GREYMON_ATTACK_GAIA_FORCE, WAR_GREYMON_BODY_ACTION, WAR_GREYMON_BODY_NEUTRAL,
 };
-use crate::pet::species::{MusicDanceStyle, PetAction, PetSpecies};
+use crate::pet::species::{AttentionState, FoodType, MusicDanceStyle, PetAction, PetSpecies};
 use crate::pet::{PetMood, SpriteFlip};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
@@ -107,8 +108,15 @@ pub fn render_pet(target: &mut BandTarget, state: &UiState) {
     // 5. Render props and floating particles
     render_props_and_particles(&mut target.buffer[..], band_y, base_x, floor_y, pet);
 
-    // 6. Draw Top Stats HUD (Hunger Hearts & Strength Bolts) as topmost overlay
-    render_stats_hud(target, band_y, pet.hunger, pet.strength);
+    // 6. Draw Top Stats HUD (Hunger Hearts, Strength Bolts & Attention Icon) as topmost overlay
+    render_stats_hud(
+        target,
+        band_y,
+        pet.hunger,
+        pet.strength,
+        pet.attention,
+        pet.anim_tick,
+    );
 
     // 7. Draw Pendulum Shake Training Gauge if actively shaking
     if pet.training_shakes > 0 || matches!(pet.action, PetAction::ShakeChargeSprint { .. }) {
@@ -646,7 +654,11 @@ fn render_omegamon_anatomy(
     }
 }
 
-/// Render action props (Meat, Poop, Hearts, Notes) with 2x scale.
+/// Render action props (Meat, Pill, Poop, Hearts, Notes) with 2x scale.
+#[allow(
+    clippy::large_stack_frames,
+    reason = "Anatomy and action props rendering across 240x20 band buffer"
+)]
 fn render_props_and_particles(
     buffer: &mut [u16],
     band_y: i32,
@@ -657,29 +669,90 @@ fn render_props_and_particles(
     const SCALE: u8 = 2;
     let body_oy = floor_y - 72;
 
-    // Roast meat dropping or being eaten
-    if matches!(
-        pet.action,
-        PetAction::NoticeFood | PetAction::EatingChew { .. }
-    ) {
-        let meat_y = if matches!(pet.action, PetAction::NoticeFood) {
-            body_oy - 28 // Meat hovering/falling from above
+    // Food dropping or being eaten (Roast Meat or Super Vitamin Protein Pill)
+    if let PetAction::NoticeFood(food_type) | PetAction::EatingChew { food_type, .. } = pet.action {
+        let food_y = if matches!(pet.action, PetAction::NoticeFood(_)) {
+            body_oy - 28 // Food hovering/falling from above
         } else {
-            body_oy + 44 // Meat near mouth fangs
+            body_oy + 44 // Food near mouth fangs
         };
-        ITEM_ROAST_MEAT.blit_to_band_scaled(
-            buffer,
-            band_y,
-            base_x - 14,
-            meat_y,
-            SCALE,
-            SpriteFlip::Normal,
-        );
+        match food_type {
+            FoodType::Meat => {
+                ITEM_ROAST_MEAT.blit_to_band_scaled(
+                    buffer,
+                    band_y,
+                    base_x - 14,
+                    food_y,
+                    SCALE,
+                    SpriteFlip::Normal,
+                );
+            }
+            FoodType::Pill => {
+                ITEM_PROTEIN_PILL.blit_to_band_scaled(
+                    buffer,
+                    band_y,
+                    base_x - 10,
+                    food_y,
+                    SCALE,
+                    SpriteFlip::Normal,
+                );
+            }
+        }
     }
 
     // Accumulated green poop on the floor
     if pet.poop_count > 0 {
         ITEM_POOP.blit_to_band_scaled(buffer, band_y, base_x + 50, 150, SCALE, SpriteFlip::Normal);
+    }
+
+    // Digital Water Flush Wave sweeping across the platform floor
+    if let PetAction::FlushClean { tick } = pet.action {
+        let wave_front = ((tick as i32 * 240) / 20).clamp(0, 240);
+        let wave_y_min = 148;
+        let wave_y_max = 176;
+        for py in wave_y_min..wave_y_max {
+            if py >= band_y && py < band_y + BAND_HEIGHT as i32 {
+                let row_idx = (py - band_y) as usize * 240;
+                let start_x = (wave_front - 45).max(0);
+                for px in start_x..wave_front {
+                    let col = if (px + py + pet.anim_tick as i32) % 4 == 0 {
+                        DIGIMON_16_PALETTE[2] // Pure White froth
+                    } else if (px + py) % 2 == 0 {
+                        DIGIMON_16_PALETTE[15] // Platform Tech Cyan
+                    } else {
+                        DIGIMON_16_PALETTE[12] // Sky Blue Highlight
+                    };
+                    let target_idx = row_idx + px as usize;
+                    if target_idx < buffer.len() {
+                        buffer[target_idx] = col;
+                    }
+                }
+            }
+        }
+    }
+
+    // Sickness skull floating over head
+    if pet.is_sick() {
+        FX_SKULL.blit_to_band_scaled(
+            buffer,
+            band_y,
+            base_x - 10,
+            body_oy - 20,
+            SCALE,
+            SpriteFlip::Normal,
+        );
+    }
+
+    // Healing bandage over body when HealCure action is active
+    if matches!(pet.action, PetAction::HealCure { .. }) {
+        FX_BANDAGE.blit_to_band_scaled(
+            buffer,
+            band_y,
+            base_x - 10,
+            body_oy + 10,
+            SCALE,
+            SpriteFlip::Normal,
+        );
     }
 
     // Happy floating heart
@@ -739,8 +812,15 @@ fn render_props_and_particles(
     }
 }
 
-/// Render safe top HUD indicators: 4 Ruby Hearts (Hunger) and 4 Golden Bolts (Strength).
-fn render_stats_hud(target: &mut BandTarget, band_y: i32, hunger: u8, strength: u8) {
+/// Render safe top HUD indicators: 4 Ruby Hearts (Hunger), 4 Golden Bolts (Strength), and Call Attention (⚠️).
+fn render_stats_hud(
+    target: &mut BandTarget,
+    band_y: i32,
+    hunger: u8,
+    strength: u8,
+    attention: AttentionState,
+    anim_tick: u16,
+) {
     // HUD is located in top safe band Y: 18..36
     if !(16..=38).contains(&band_y) && !(16..=38).contains(&(band_y + BAND_HEIGHT as i32)) {
         return;
@@ -772,6 +852,17 @@ fn render_stats_hud(target: &mut BandTarget, band_y: i32, hunger: u8, strength: 
             .into_styled(PrimitiveStyle::with_fill(color))
             .draw(target)
             .ok();
+    }
+
+    // Rightmost: Call for Attention blinking prompt icon (⚠️)
+    if attention.is_calling() && ((anim_tick / 12) & 1) == 0 {
+        HUD_CALL_ATTENTION.blit_to_band(
+            &mut target.buffer[..],
+            band_y,
+            196,
+            22,
+            SpriteFlip::Normal,
+        );
     }
 }
 

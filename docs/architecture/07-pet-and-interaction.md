@@ -90,24 +90,30 @@ pub trait PetBehavior {
   - 结合 IMU 重力姿态、倾斜平衡、摇晃计数与敲击手势；
   - 蓝牙音乐遥测作为第一公民动作，依据 BPM 周期与节拍相位精准驱动 5 级编舞（带专属霓虹 EQ 与耳机特效）；
   - 状态机在事件到来时保证动作优雅收尾（Exit）再切入，杜绝粗暴跳帧与瞬移；
-  - 维护 RTC 昼夜节律与体征代谢（饱腹心形与力量闪电指示、吃肉、如厕排泄、Zzz 睡眠气泡）。
+  - 维护 RTC 昼夜节律与体征代谢（饱腹心形与力量闪电指示、吃肉、如厕排泄、Zzz 睡眠气泡、真实体重与年龄增长）；
+  - **经典呼叫提醒与失误系统 (Attention Call & Care Mistakes)**：当数码兽饱腹度归零、地面有便便未清或生病时，右上角经典像素呼叫灯（⚠️）闪烁提醒；超时 3 分钟未予照料则记录 1 次养育失误（`care_mistakes`）；
+  - **生病与抚摸治疗机制 (Sickness & Healing)**：便便堆积 $\ge 3$ 坨或饥饿维持过久，数码兽触发生病状态（骷髅 💀 特效、虚弱眩晕），轻拍或照料触发治愈包扎（`HealCure`）恢复健康。
 
 ## 4. 应用交互映射
 
-当前 `AppStateMachine` 的交互映射如下：
+当前 `AppStateMachine` 的正统数码机养成交互映射如下：
 
-| 输入 | 场景条件 | 本地数码兽行为 | 可选 BLE HID 动作 |
+| 输入 | 场景条件 | 本地数码兽养成行为 | 可选 BLE HID 动作 |
 | :--- | :--- | :--- | :--- |
-| `SingleTap` | 日常状态 | 抚摸宠物，好感度 $+5$，触发 `HappyHop` 与爱心特效 | `PlayPause` |
-| `DoubleTap` | 饥饿度 $< 4$ | 投喂烤肉，饱腹 $+1$、能量 $+20$、好感 $+10$，清理 1 坨便便 | `NextTrack` |
-| `DoubleTap` | 饥饿度 $= 4$ (满腹) | **激发战斗战意，释放专属必杀技 `AttackSpecial`** | `NextTrack` |
-| `TiltLeft` | 日常状态 | 机身侧倾平衡反应，消除误喂副作用 | `PreviousTrack` |
-| `TiltRight` | 日常状态 | 机身侧倾平衡反应，消除误喂副作用 | `NextTrack` |
+| `SingleTap` | 生病状态 (`is_sick`) | **治愈疾病 (HealCure)**，包扎创口贴特效，好感 $+15$，恢复健康 | `PlayPause` |
+| `SingleTap` | 健康日常状态 | 抚摸数码兽，好感度 $+5$，触发 `HappyHop` 与爱心特效 | `PlayPause` |
+| `DoubleTap` | 生病状态 (`is_sick`) | **治愈疾病 (HealCure)**，恢复健康与心情 | `NextTrack` |
+| `DoubleTap` | 饥饿度 $< 4$ | **投喂烤肉 (Roast Meat 🍖)**，饱腹 $+1$、体重 $+1\text{g}$、能量 $+20$、好感 $+10$ | `NextTrack` |
+| `DoubleTap` | 饱腹 $= 4$ 且力量 $< 4$ | **投喂超级维生素胶囊 (Protein Pill 💊)**，力量 $+1$、体重 $+2\text{g}$、能量 $+30$、好感 $+15$ | `NextTrack` |
+| `DoubleTap` | 饱腹与力量双满 ($4/4$) | **战意昂扬，释放专属必杀技 `AttackSpecial`** | `NextTrack` |
+| `TiltLeft` / `TiltRight` | 地面有便便 (`poop > 0`) | **冲水清扫 (Toilet Flush 🚽)**：数字科技水浪横扫接地板冲净便便，数码兽解脱欢跳 `HappyHop`，好感 $+10$ | 无 (纯本地照料清洁) |
+| `TiltLeft` | 地面无便便 | 机身侧倾平衡反应，消除误喂副作用 | `PreviousTrack` |
+| `TiltRight` | 地面无便便 | 机身侧倾平衡反应，消除误喂副作用 | `NextTrack` |
 | `Shake` (1..9次) | 3秒内连续摆动 | **钟摆特训蓄力**，触发 `ShakeChargeSprint` 并实时刷新 10 段式计量槽 | 无 |
-| `Shake` (第10次) | 特训达标 | 力量填满 4 格、能量 100%；可进化时触发数码矩阵升格，终阶释放究极必杀 | 自动保存至双扇区存储 |
+| `Shake` (第10次) | 特训达标 | 力量填满 4 格、能量 100%、特训次数 $+1$、燃烧体重 $-1\text{g}$（不低于物种基准）；可进化时触发数码矩阵升格，终阶释放究极必杀 | 状态写入当前配置快照并持久化同步 |
 | `FaceDownEnter` | 反扣桌面 | 背光 0% 熄灭，数码兽进入 `SleepingZzz` 深度睡眠 | 无 |
 | `FaceDownExit` | 拾起正面朝上 | 恢复背光，数码兽触发 `StretchAndYawn` 伸展苏醒 | 无 |
-| `BOOT` (短按) | 任意视窗 | 循环轮播切换视窗：`Pet` $\to$ `Status` $\to$ `SelfTest` $\to$ `Pet` | 无 |
+| `BOOT` (短按) | 日常视窗 | **日常养成直切**：在 `Pet`（宠物主视窗）与 `Status`（数码宝贝全档案卡）之间双向切换 | 无 |
 
 HID 发送通过 `HID_ACTION_CHANNEL` 完成；宠物行为本身不能直接发送 BLE 报告。没有 BLE 客户端
 时，HID 动作被丢弃，本地宠物状态仍然更新。

@@ -30,7 +30,7 @@ pub struct DeviceConfig {
     pub pet_care_mistakes: u8,
     pub pet_training_count: u8,
     pub pet_evolution_stage: u8,
-    pub _reserved: [u8; 1],
+    pub pet_weight_g: u8,
 }
 
 impl Default for DeviceConfig {
@@ -51,7 +51,7 @@ impl Default for DeviceConfig {
             pet_care_mistakes: 0,
             pet_training_count: 0,
             pet_evolution_stage: 0,
-            _reserved: [0u8; 1],
+            pet_weight_g: 5,
         }
     }
 }
@@ -150,7 +150,7 @@ impl DeviceConfig {
         buf[CONFIG_PAYLOAD_OFFSET + 32] = self.pet_care_mistakes;
         buf[CONFIG_PAYLOAD_OFFSET + 33] = self.pet_training_count;
         buf[CONFIG_PAYLOAD_OFFSET + 34] = self.pet_evolution_stage;
-        buf[CONFIG_PAYLOAD_OFFSET + 35] = self._reserved[0];
+        buf[CONFIG_PAYLOAD_OFFSET + 35] = self.pet_weight_g;
         let crc = crc32(&buf[CONFIG_PAYLOAD_OFFSET..CONFIG_COMMIT_OFFSET]);
         put_u32_le(&mut buf, CONFIG_CRC_OFFSET, crc);
         put_u32_le(&mut buf, CONFIG_COMMIT_OFFSET, CONFIG_COMMIT_MARKER);
@@ -219,7 +219,12 @@ impl DeviceConfig {
         let pet_care_mistakes = buf[CONFIG_PAYLOAD_OFFSET + 32];
         let pet_training_count = buf[CONFIG_PAYLOAD_OFFSET + 33];
         let pet_evolution_stage = buf[CONFIG_PAYLOAD_OFFSET + 34].min(5);
-        let reserved = [buf[CONFIG_PAYLOAD_OFFSET + 35]];
+        let pet_weight_raw = buf[CONFIG_PAYLOAD_OFFSET + 35];
+        let pet_weight_g = if pet_weight_raw == 0 {
+            5
+        } else {
+            pet_weight_raw
+        };
 
         Ok(Self {
             magic,
@@ -237,7 +242,7 @@ impl DeviceConfig {
             pet_care_mistakes,
             pet_training_count,
             pet_evolution_stage,
-            _reserved: reserved,
+            pet_weight_g,
         })
     }
 
@@ -284,7 +289,7 @@ impl DeviceConfig {
             pet_care_mistakes: 0,
             pet_training_count: 0,
             pet_evolution_stage: 0,
-            _reserved: [0],
+            pet_weight_g: 5,
         })
     }
 }

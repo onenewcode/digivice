@@ -15,7 +15,8 @@ pub use assets::*;
 pub use default::DefaultPet;
 pub use model::{PetAnimationState, PetFrame, PetMood, PupilShape};
 pub use species::{
-    ActionPhase, LookDirection, MusicDanceStyle, PetAction, PetSpecies, SleepState, StepLeg,
+    ActionPhase, AttentionState, FoodType, HealthStatus, LookDirection, MusicDanceStyle, PetAction,
+    PetSpecies, SleepState, StepLeg,
 };
 pub use transition::{InertialTransform, SPRING_SQUASH_LUT, SquashStretch, spring_squash_step};
 
@@ -29,6 +30,7 @@ pub enum PetEvent {
     DoubleTap,
     Shake,
     Attack,
+    Flush,
     FaceDown,
     FaceUp,
     MusicScene(MusicScene),

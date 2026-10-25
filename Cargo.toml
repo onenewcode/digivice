@@ -7,7 +7,11 @@ repository  = "https://github.com/onenewcode/digivice"
 
 [[bin]]
 name = "digivice"
-path = "./src/bin/main.rs"
+path = "./src/bin/digivice.rs"
+
+[[bin]]
+name = "selftest"
+path = "./src/bin/selftest.rs"
 
 [dependencies]
 esp-hal = { version = "~1.2.2", features = ["esp32c6", "unstable"] }
