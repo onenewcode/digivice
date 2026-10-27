@@ -1,0 +1,5 @@
+[flash]
+size = "16MB"
+
+[partition_table]
+path = "partitions.csv"

@@ -3,10 +3,15 @@ set -e
 
 PATH="$HOME/.cargo/bin:$PATH"
 
+echo "Pre-commit: Checking formatting..."
 if ! cargo fmt --all -- --check; then
-    cargo fmt --all
-    echo "Pre-commit: Code reformatted. Please stage changes and commit again." >&2
+    echo "Pre-commit error: Code formatting check failed." >&2
+    echo "Run 'cargo fmt --all' manually, review changes, and stage them before committing." >&2
     exit 1
 fi
 
+echo "Pre-commit: Running Clippy..."
 cargo clippy --all-features --workspace -- -D warnings
+
+echo "Pre-commit: Running host regression tests..."
+sh scripts/test-host.sh --locked

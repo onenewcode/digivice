@@ -10,6 +10,7 @@ rustflags = [
   # NOTE: May negatively impact performance of produced code
   "-C", "force-frame-pointers",
   "-Z", "stack-protector=all",
+  "-C", "split-debuginfo=off",
 ]
 
 target = "riscv32imac-unknown-none-elf"

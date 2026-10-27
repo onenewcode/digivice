@@ -1,11 +1,13 @@
 # 桌面数码暴龙机（Digivice）
 
+Coding agents: skip this README and read AGENTS.md directly.
+
 [English](README_EN.md) | [中文](README.md)
 
 > **An Autonomous Desktop Cyberpet & Digivice firmware targeting Espressif ESP32-C6 in pure `#![no_std]` Rust.**
 > Features 6-stage authentic Bandai pixel evolution, Zero-FPU rotated sprite rasterization, and 6-DOF IMU tilt physics.
 
-基于 Espressif **ESP32-C6** 和 Waveshare ESP32-C6-LCD-1.28 的纯 Rust、`#![no_std]` 桌面智能硬件。项目目标是一个**不需要电脑常驻程序也能自主工作的桌面数码宝贝**：自主计时、6轴姿态感知、数码兽进化节律、专注伴侣与断电状态持久化。
+基于 Espressif **ESP32-C6** 和 Waveshare ESP32-C6-LCD-1.28 的纯 Rust、`#![no_std]` 桌面智能硬件。项目目标是一个**不需要电脑常驻程序也能自主工作的桌面数码宝贝**：6轴姿态感知、本地养成互动、数码兽进化和限频存档。真实昼夜需要已验证的 RTC 或已校准软件锚点；未校准时间只作占位，不安排夜间作息。
 
 电脑或手机连接只是增强能力：
 
@@ -21,6 +23,7 @@
 ### 经典万代像素与 6 阶段数码进化系统
 
 重现初代数码暴龙机经典 16 色点阵视觉，完整实现亚古兽经典进化路线与双帧步行动画、数字矩阵进化特效：
+
 - **幼年期 II (Baby II)**: 滚球兽 (Koromon, 16×16)
 - **成长期 (Child)**: 亚古兽 (Agumon, 16×16)
 - **成熟期 (Adult)**: 暴龙兽 (Greymon, 24×24)
@@ -40,13 +43,14 @@
 - 针对 ESP32-C6 RISC-V RV32IMAC 无硬件浮点单元架构，采用 91 点四分之一波定点正弦表（Q12 精度）计算反向仿射变换；
 - 逐行屏幕带缓冲区（Screen Bands）流式光栅化与透明色键混合，避免占用整屏帧缓冲区与任何堆内存分配。
 
-### 本地专注与桌面陪伴
+### 本地养成与存档边界
 
-设备通过 RTC、IMU、电池、充电、在席和手势运行本地 `FocusSession`：
-- 专注模式、短休息、长休息与完成节律；
-- 离席时自动休眠并降低背光，回到桌面时活泼苏醒；
-- 独立持久化存储：基于 Flash 双扇区 Ping-Pong 架构，掉电安全保存数码兽阶段、训练次数与专注历史；
-- 无需电脑、手机或云端常驻，离线 100% 完整运行。
+- 宠物互动、睡眠和单调时间代谢不要求电脑、手机或云端常驻；`FocusSession` / 专注历史功能尚未实现。
+- 在席报告可降低背光；物理反扣熄屏，可信夜间时间决定昼夜睡眠。软件时钟不能在断电后自行恢复真实时间，用户可操作校时入口仍待完成。
+- 唯一 Flash 任务采用双扇区提交，使用 V3 保存饥饿、力量、阶段、体重、照料失误及 16 位训练次数等字段（只读兼容 V1/V2）。变更合并，保存尝试至少间隔 300 秒；正常供电且写入成功时可能丢失约五分钟未提交进度，写入持续失败则没有有限的丢失窗口保证。
+- 启动只读 A/B 配置并报告来源、各区状态和加载耗时；若任一区读取失败，保存保持 RETRY，拒绝擦除可能仍含旧档的区域，当前需重启后完整恢复读取。
+- Status 中 `SAVE:SYNC/PENDING/WRITING/RETRY #seq` 区分已同步、未提交、在途和失败状态；序号只在验证成功后更新。训练次数已支持 0～65535；V3 已恢复年龄值、疾病、排泄、能量、亲密度和代谢余量，重启不补算断电期间生理变化；年龄已按可信日历日差结算，回退不减龄/重复计日，缺少可信时间时不补龄。
+- 掉电验证目前是 host NOR 故障注入，不是整机实测；不保证任意 Flash 损坏都能恢复。
 
 ### BLE 音乐联动与无线控制
 
@@ -76,15 +80,15 @@
 
 ## 硬件资源
 
-| 模块 | 规格 |
-| --- | --- |
-| 主控 | ESP32-C6，RISC-V，最高 160MHz |
-| 显示 | GC9A01，240x240 圆形 LCD |
-| 传感器 | QMI8658 六轴 IMU |
-| 时钟 | PCF85063 RTC |
-| 无线 | BLE 5、Wi-Fi 6、IEEE 802.15.4（本项目首版使用 BLE） |
-| 存储 | 16MB SPI NOR Flash |
-| 供电 | USB-C、3.7V 锂电池、ETA6098 |
+| 模块   | 规格                                                |
+| ------ | --------------------------------------------------- |
+| 主控   | ESP32-C6，RISC-V，最高 160MHz                       |
+| 显示   | GC9A01，240x240 圆形 LCD                            |
+| 传感器 | QMI8658 六轴 IMU                                    |
+| 时钟   | PCF85063 RTC                                        |
+| 无线   | BLE 5、Wi-Fi 6、IEEE 802.15.4（本项目首版使用 BLE） |
+| 存储   | 16MB SPI NOR Flash                                  |
+| 供电   | USB-C、3.7V 锂电池、ETA6098                         |
 
 完整引脚和电气约束见 [`docs/hardware-esp32-c6-lcd-1.28.md`](docs/hardware-esp32-c6-lcd-1.28.md)。
 
@@ -112,3 +116,10 @@ espflash list-ports
 ```
 
 具体说明见 [`docs/flashing.md`](docs/flashing.md)。
+
+---
+
+## 许可证与知识产权声明 (License & Trademarks)
+
+- **固件代码 (Firmware Code)**：本项目源码采用 **MIT** 或 **Apache-2.0** 双重许可证开源，详见 [`LICENSE-MIT`](LICENSE-MIT) 与 [`LICENSE-APACHE`](LICENSE-APACHE)。
+- **商标与角色版权 (Trademarks & Copyrights)**：数码宝贝（Digimon）相关角色名、设计及点阵图案为 **BANDAI CO., LTD.**、**WiZ** 及 **东映动画（Toei Animation）** 之版权所有。本项目素材仅用于非商业性复古嵌入式学术研究与个人学习演示，任何商业化硬件产品均须替换为原创资产。

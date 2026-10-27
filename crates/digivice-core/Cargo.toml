@@ -1,0 +1,19 @@
+[package]
+name = "digivice-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Core domain models, pet state machine, gesture algorithms, and storage coordination for Digivice"
+
+[dependencies]
+embassy-sync     = "0.6.2"
+embassy-time     = { version = "0.5.0", features = ["generic-queue-8"] }
+heapless         = "0.8.0"
+embedded-hal     = "1.0.0"
+embedded-storage = "0.3.1"
+libm             = "0.2.11"
+log              = { version = "0.4.22", default-features = false }
+
+[target.'cfg(not(target_arch = "riscv32"))'.dev-dependencies]
+embassy-sync = { version = "0.6.2", features = ["std"] }
+embassy-time = { version = "0.5.0", features = ["mock-driver", "generic-queue-8", "tick-hz-1_000_000"] }

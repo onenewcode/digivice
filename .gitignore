@@ -2,8 +2,9 @@
 debug/
 target/
 
-# Dependency lock file
-Cargo.lock
+# Track both firmware and host lockfiles so release builds resolve reproducibly.
+!Cargo.lock
+!tests/host/Cargo.lock
 
 # Editor configuration
 .claude/

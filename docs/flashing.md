@@ -78,8 +78,7 @@ espflash erase-flash                       # 整片擦除
 espflash save-image --merge <ELF> out.bin  # 导出合并镜像
 ```
 
-bootloader 和分区表不用自己准备：本工程不依赖 `esp-idf-sys`，`espflash` 会使用
-其内置的默认 bootloader 和分区表。
+工程提供显式分区表 `partitions.csv`，在项目级 `espflash.toml` 中配置。该分区表建立了应用镜像 (`factory`: 0x10000..0x400000, 4032KB) 与持久化存储 (`storage`: 0x400000..0x1000000, 12MB) 之间机器可检查的 4MB 物理分界线，杜绝固件镜像增长或分区变动覆盖用户存档。可随时运行 `python3 scripts/check-flash-layout.py` 验证布局与当前二进制占用。
 
 ## 进入下载模式
 
@@ -120,6 +119,9 @@ serial = "/dev/ttyUSB0"
 
 ## 常见问题
 
+- **macOS 构建出现 `cannot parse the debug map` 文本**：
+  在 macOS 宿主机上，局部缓存工具（如 `kache`）或系统后处理工具可能尝试调用 Xcode `/usr/bin/dsymutil` 提取调试符号。由于固件目标产物是标准的 32 位 RISC-V ELF (`riscv32imac-unknown-none-elf`) 而非 macOS Mach-O 格式，`dsymutil` 会输出 `The file was not recognized as a valid object file` 诊断信息。
+  该信息不影响构建：Cargo 与 rustc 退出码始终为 0，生成的 ELF 产物结构完整有效（可通过 `python3 scripts/check-flash-layout.py` 验证）。在标准 Linux 环境或 CI 中不会出现此项提示。
 - **报无串口**：用 `espflash list-ports --list-all-ports` 确认端口存在。
 - **Linux 权限不足**：把用户加入 `dialout` 组，例如
   `sudo usermod -a -G dialout $USER`，重新登录或 `su - $USER` 生效。

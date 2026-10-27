@@ -36,7 +36,7 @@ flowchart TD
         MUSIC["MusicScene\n节拍/能量/情绪"]
         APP["AppStateMachine\n本地状态协调"]
         RENDER["ui_render_task\n圆屏/背光"]
-        STORAGE["StorageManager\n启动加载/双扇区"]
+        STORAGE["storage_task / StorageManager\n启动加载/限频保存/双扇区"]
         HID["BLE HID\n媒体控制"]
         GATT["BLE GATT\nMusicScene"]
     end
@@ -56,6 +56,7 @@ flowchart TD
     SENSOR --> PET
     MUSIC --> PET
     PET --> APP
+    APP -->|保存请求/确认| STORAGE
     APP --> RENDER
     RENDER --> LCD
     RADIO --> GATT
@@ -67,25 +68,42 @@ flowchart TD
 
 ---
 
-## 2. 源码目录职责
+## 2. 源码目录与多 Crate 架构职责
+
+本工程遵循工业级嵌入式 Rust 标准，采用 **Cargo Workspace（多 Crate 工作区）** 架构，彻底解耦纯业务领域模型、硬件外设抽象与系统固件并发装配：
 
 ```text
 digivice/
-├── docs/architecture/          # 与实现同步的架构规范
-├── src/
-│   ├── bin/
-│   │   ├── digivice.rs         # 正统桌面数码兽产品组合根：初始化硬件、堆、板卡、BLE栈并启动并发任务
-│   │   └── selftest.rs         # 独立工厂硬件自检诊断工具：全外设检验与实时遥测视窗
-│   ├── app/                    # 本地应用状态协调与工作流 (AppStateMachine, ConfigState)
-│   ├── board/                  # LCD、IMU、RTC、电源与硬件引脚隔离 (BSP)
-│   ├── domain/                 # 核心跨层抽象领域模型 (ViewMode, DeviceOrientation, MusicScene, HidAction)
-│   ├── gesture/                # 姿态滤波与敲击/倾斜手势识别引擎
-│   ├── ipc.rs                  # 全局静态 Channel 与 Signal 权威总线
-│   ├── pet/                    # PetBehavior 接口、滚球兽自主状态机、模块化资产 (assets/) 与零浮点弹性物理
-│   ├── radio/                  # 完整 BLE 射频：在席感知 (presence)、GATT 服务 (gatt)、HID 编码 (hid)
-│   ├── storage/                # 可靠存储：双扇区配置 (config)、黑匣子 (blackbox)、容灾管理 (manager)、CRC32
-│   ├── tasks/                  # 异步并发任务汇集层 (sensor, rtc, radio, ui, app)
-│   └── ui/                     # 纯圆形屏呈现层 (UiState 快照、主题、数码兽主视图、状态卡片、自检视图)
+├── docs/architecture/          # 与实现严格同步的架构规范
+├── partitions.csv              # ESP32-C6 16MB Flash 分区表（应用 4MB / 自定义存储 12MB 硬分界线）
+├── espflash.toml               # 固件刷写与分区表绑定配置
+├── scripts/                    # 自动化布局校验 (check-flash-layout.py) 与宿主测试启动脚本 (test-host.sh)
+├── crates/
+│   ├── digivice-core/          # 【纯逻辑核心库】(#![no_std]，零硬件依赖，跨平台原生运行 cargo test)
+│   │   ├── src/
+│   │   │   ├── domain/         # 核心跨层抽象领域模型 (ViewMode, DeviceOrientation, MusicScene, HidAction)
+│   │   │   ├── drivers/        # 平台无关的通用传感器芯片驱动 (QMI8658 IMU, PCF85063 RTC)
+│   │   │   ├── gesture/        # 姿态滤波 (Attitude) 与敲击/倾斜手势识别引擎
+│   │   │   ├── pet/            # PetBehavior 接口、滚球兽自主状态机、模块化资产 (assets/) 与弹性物理
+│   │   │   ├── protocol/       # BLE HID Consumer 报告编码、在席追踪 (presence) 与通信协议模型
+│   │   │   ├── storage/        # 可靠存储：双扇区配置 (config)、黑匣子 (blackbox)、容灾管理 (manager)、CRC32
+│   │   │   └── ui/             # 纯数据展示模型 (UiState, DirtyBounds)
+│   │   └── tests/              # 5 大高内聚集成测试套件 (storage, gesture, pet_lifecycle, clock, protocol)
+│   ├── digivice-bsp/           # 【板级支持包】(ESP32-C6 硬件外设与物理引脚隔离)
+│   │   └── src/
+│   │       ├── display.rs      # GC9A01 240x240 圆形 LCD 驱动（分带光栅化与 LEDC 背光 PWM）
+│   │       ├── power_key.rs    # 电池分压采样 ADC、充电状态 GPIO 与物理按键消抖
+│   │       └── lib.rs          # 板级总线单例、引脚绑定 (BoardPeripherals) 与安全隔离
+│   └── digivice-firmware/      # 【系统固件主程序】(Embassy 并发运行时与主入口)
+│       └── src/
+│           ├── bin/
+│           │   ├── digivice.rs # 正统桌面数码兽产品组合根：初始化 CPU 时钟、堆、板卡、BLE栈并启动任务
+│           │   └── selftest.rs # 独立工厂硬件自检诊断工具：全外设检验与实时遥测视窗
+│           ├── app/            # 本地应用状态协调与工作流 (AppStateMachine, ConfigState)
+│           ├── ipc/            # 全局静态 Channel 与 Signal 权威异步总线
+│           ├── radio/          # 完整 BLE 射频：Trouble-host GATT 服务与 esp-radio 射频驱动
+│           ├── tasks/          # 异步并发任务汇集层 (sensor, rtc, radio, ui, app, storage)
+│           └── ui/             # 基于 embedded-graphics 的圆屏像素呈现层 (pet_view, status_view, selftest_view)
 ```
 
 连接适配器只向本地类型化通道投递有界事件；USB-Serial-JTAG 不属于应用业务通道。
@@ -119,3 +137,5 @@ digivice/
 - 宠物视图、动画状态、精灵资产格式或刷新策略；
 - 任务拓扑、静态通道或 Flash 存储布局；
 - 板级引脚、显示带缓冲、BLE 在席阈值和功耗策略。
+
+
